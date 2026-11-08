@@ -1,0 +1,351 @@
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import TailorPage from '@/app/(default)/tailor/page';
+import type { ResumeListItem } from '@/lib/api/resume';
+import { DEFAULT_TEMPLATE_SETTINGS } from '@/lib/types/template-settings';
+
+const api = vi.hoisted(() => ({
+  upload: vi.fn(),
+  preview: vi.fn(),
+  confirm: vi.fn(),
+  list: vi.fn(),
+  push: vi.fn(),
+  back: vi.fn(),
+  setPreview: vi.fn(),
+  jobs: vi.fn(),
+  improvements: vi.fn(),
+  resumes: vi.fn(),
+  agentMode: false,
+}));
+const router = { push: api.push, back: api.back };
+const t = (key: string) => key;
+vi.mock('next/navigation', () => ({ useRouter: () => router }));
+vi.mock('@/lib/i18n', () => ({ useTranslations: () => ({ t, locale: 'es' }) }));
+vi.mock('@/lib/api/resume', () => ({
+  uploadJobDescriptions: api.upload,
+  previewImproveResume: api.preview,
+  confirmImproveResume: api.confirm,
+  fetchResumeList: api.list,
+  toPageFitSettings: (settings: { template: string }, locale?: string) => ({
+    template: settings.template,
+    lang: locale,
+  }),
+}));
+vi.mock('@/lib/api/config', () => ({
+  fetchPromptConfig: async () => ({ prompt_options: [], default_prompt_id: 'keywords' }),
+}));
+vi.mock('@/components/common/resume_previewer_context', () => ({
+  useResumePreview: () => ({ setImprovedData: api.setPreview }),
+}));
+vi.mock('@/lib/context/status-cache', () => ({
+  useStatusCache: () => ({
+    status: { llm_configured: !api.agentMode, agent_mode: api.agentMode },
+    isLoading: false,
+    incrementJobs: api.jobs,
+    incrementImprovements: api.improvements,
+    incrementResumes: api.resumes,
+  }),
+}));
+vi.mock('@/components/tailor/diff-preview-modal', () => ({
+  DiffPreviewModal: ({
+    onConfirm,
+    selectionSummary,
+  }: {
+    onConfirm: () => void;
+    selectionSummary?: { bullets_after: number } | null;
+  }) => (
+    <div role="dialog">
+      <button onClick={onConfirm}>Confirm preview</button>
+      {selectionSummary && <span data-testid="selection">{selectionSummary.bullets_after}</span>}
+    </div>
+  ),
+}));
+
+const PROMPT_ID = 'keywords';
+
+function master(id: string, isDefault: boolean, title: string): ResumeListItem {
+  return {
+    resume_id: id,
+    filename: null,
+    is_master: true,
+    is_default_master: isDefault,
+    parent_id: null,
+    processing_status: 'ready',
+    created_at: '',
+    updated_at: '',
+    title,
+  };
+}
+
+const PREVIEW_RESULT = {
+  request_id: 'preview-request',
+  data: {
+    job_id: 'job',
+    preview_id: 'preview',
+    resume_id: null,
+    resume_preview: { personalInfo: { name: 'Ada' } },
+    improvements: [],
+    diff_summary: { total_changes: 1 },
+    detailed_changes: [],
+  },
+};
+const CONFIRMED = {
+  request_id: 'confirmed-request',
+  data: { job_id: 'job', resume_id: 'tailored' },
+};
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  localStorage.clear();
+  api.upload.mockResolvedValue('job');
+  api.preview.mockResolvedValue(PREVIEW_RESULT);
+  api.confirm.mockResolvedValue(CONFIRMED);
+});
+
+async function renderPage() {
+  const view = render(<TailorPage />);
+  await act(async () => {});
+  return view;
+}
+
+async function fillJobDescriptionAndGenerate() {
+  fireEvent.change(screen.getByRole('textbox'), {
+    target: { value: 'A software engineer role building useful tools with Python and SQL.' },
+  });
+  await act(async () => screen.getByRole('button', { name: 'tailor.generateTailored' }).click());
+}
+
+// The Dropdown trigger announces "<label> <current value>", so match on the label prefix.
+const PICKER_NAME = /^tailor\.selectResume\b/;
+
+function chooseMaster(label: string, options: { hidden?: boolean } = {}) {
+  fireEvent.click(screen.getByRole('button', { name: PICKER_NAME, ...options }));
+  fireEvent.click(screen.getByRole('option', { name: new RegExp(label), ...options }));
+}
+
+async function confirmDiff() {
+  await act(async () => screen.getByRole('button', { name: 'Confirm preview' }).click());
+}
+
+describe('tailor page master picker', () => {
+  it('preselects the default master and sends the stored bullet cap', async () => {
+    localStorage.setItem(
+      'tailor_length_settings',
+      JSON.stringify({ maxPages: 2, maxBulletsPerEntry: 3 })
+    );
+    api.list.mockResolvedValue([
+      master('m1', false, 'DevRel'),
+      master('m2', true, 'Solutions Eng'),
+    ]);
+    await renderPage();
+    expect(await screen.findByText('Solutions Eng')).toBeInTheDocument();
+    await fillJobDescriptionAndGenerate();
+    expect(api.preview).toHaveBeenCalledWith(
+      'm2',
+      'job',
+      PROMPT_ID,
+      expect.objectContaining({ maxBulletsPerEntry: 3 })
+    );
+  });
+
+  it("sends page-fit settings built from the source resume's formatting and UI locale", async () => {
+    const formatted = {
+      ...master('m1', true, 'DevRel'),
+      template_settings: { ...DEFAULT_TEMPLATE_SETTINGS, template: 'modern' as const },
+    };
+    api.list.mockResolvedValue([formatted, master('m2', false, 'Solutions Eng')]);
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    // Default length settings: two-page limit, no per-role bullet cap.
+    expect(api.preview).toHaveBeenCalledWith('m1', 'job', PROMPT_ID, {
+      pageFit: { template: 'modern', lang: 'es' },
+      maxPages: 2,
+      progressId: expect.any(String),
+    });
+  });
+
+  it('fits a never-formatted source resume to the default template', async () => {
+    // A browser-wide setting from older versions is ignored.
+    localStorage.setItem('resume_builder_settings', JSON.stringify({ template: 'modern' }));
+    api.list.mockResolvedValue([master('m1', true, 'DevRel')]);
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    expect(api.preview).toHaveBeenCalledWith('m1', 'job', PROMPT_ID, {
+      pageFit: { template: 'swiss-single', lang: 'es' },
+      maxPages: 2,
+      progressId: expect.any(String),
+    });
+  });
+
+  it('sends and remembers the chosen page limit and bullet cap', async () => {
+    api.list.mockResolvedValue([master('m1', true, 'DevRel')]);
+    await renderPage();
+    fireEvent.click(screen.getByRole('button', { name: /tailor\.length\.pageLimitLabel/ }));
+    fireEvent.click(screen.getByRole('option', { name: /tailor\.length\.pageLimitOptions\.none/ }));
+    fireEvent.click(screen.getByRole('button', { name: /tailor\.length\.bulletsLabel/ }));
+    fireEvent.click(screen.getByRole('option', { name: /tailor\.length\.bulletOptions\.5/ }));
+    await fillJobDescriptionAndGenerate();
+    // No page limit: no page fit is requested, only the per-role cap.
+    expect(api.preview).toHaveBeenCalledWith('m1', 'job', PROMPT_ID, {
+      maxBulletsPerEntry: 5,
+      progressId: expect.any(String),
+    });
+    expect(JSON.parse(localStorage.getItem('tailor_length_settings') ?? '{}')).toEqual({
+      maxPages: null,
+      maxBulletsPerEntry: 5,
+    });
+  });
+
+  it('keeps Generate disabled until a source master is resolved', async () => {
+    api.list.mockReturnValue(new Promise(() => {})); // the resume list never arrives
+    await renderPage();
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'A software engineer role building useful tools with Python and SQL.' },
+    });
+    expect(screen.getByRole('button', { name: 'tailor.generateTailored' })).toBeDisabled();
+  });
+
+  it('shows no picker when there is a single ready master', async () => {
+    api.list.mockResolvedValue([master('m1', true, 'DevRel')]);
+    await renderPage();
+    expect(screen.queryByRole('button', { name: PICKER_NAME })).toBeNull();
+  });
+
+  it('lists only ready masters in the picker', async () => {
+    api.list.mockResolvedValue([
+      master('m1', true, 'DevRel'),
+      { ...master('m2', false, 'Half Parsed'), processing_status: 'processing' },
+      { ...master('m3', false, 'Tailored'), is_master: false },
+      master('m4', false, 'SWE'),
+    ]);
+    await renderPage();
+    fireEvent.click(screen.getByRole('button', { name: PICKER_NAME }));
+    expect(screen.getAllByRole('option').map((el) => el.textContent)).toEqual([
+      expect.stringContaining('DevRel'),
+      expect.stringContaining('SWE'),
+    ]);
+  });
+
+  it('falls back to the stored master id when no master is the default', async () => {
+    localStorage.setItem('master_resume_id', 'm2');
+    api.list.mockResolvedValue([master('m1', false, 'DevRel'), master('m2', false, 'SWE')]);
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    expect(api.preview).toHaveBeenCalledWith('m2', 'job', PROMPT_ID, expect.anything());
+  });
+
+  it('uses the stored master id when the list request fails', async () => {
+    localStorage.setItem('master_resume_id', 'stored');
+    api.list.mockRejectedValue(new Error('offline'));
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    expect(api.preview).toHaveBeenCalledWith('stored', 'job', PROMPT_ID, expect.anything());
+    expect(api.push).not.toHaveBeenCalled();
+  });
+
+  it('redirects to the dashboard when the list request fails and nothing is stored', async () => {
+    api.list.mockRejectedValue(new Error('offline'));
+    await renderPage();
+    await waitFor(() => expect(api.push).toHaveBeenCalledWith('/dashboard'));
+  });
+
+  it('redirects to the dashboard when no ready master exists, even with a stored id', async () => {
+    localStorage.setItem('master_resume_id', 'm1');
+    api.list.mockResolvedValue([{ ...master('m1', true, 'X'), processing_status: 'processing' }]);
+    await renderPage();
+    await waitFor(() => expect(api.push).toHaveBeenCalledWith('/dashboard'));
+  });
+});
+
+describe('tailor page pinned preview source', () => {
+  it('locks the picker while a preview runs and confirms with the source it was built from', async () => {
+    api.list.mockResolvedValue([master('m1', true, 'DevRel'), master('m2', false, 'SWE')]);
+    let resolvePreview!: (value: unknown) => void;
+    api.preview.mockReturnValue(new Promise((resolve) => (resolvePreview = resolve)));
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    expect(api.preview).toHaveBeenCalledWith('m1', 'job', PROMPT_ID, expect.anything());
+    const picker = screen.getByRole('button', { name: PICKER_NAME });
+    expect(picker).toBeDisabled();
+    await act(async () => resolvePreview(PREVIEW_RESULT));
+    expect(picker).toBeDisabled(); // still locked while the diff modal is open
+    await confirmDiff();
+    expect(api.confirm).toHaveBeenCalledWith(expect.objectContaining({ resume_id: 'm1' }));
+  });
+
+  it('previews and confirms the master chosen before generating', async () => {
+    api.list.mockResolvedValue([master('m1', true, 'DevRel'), master('m2', false, 'SWE')]);
+    await renderPage();
+    chooseMaster('SWE');
+    await fillJobDescriptionAndGenerate();
+    await confirmDiff();
+    expect(api.preview).toHaveBeenCalledWith('m2', 'job', PROMPT_ID, expect.anything());
+    expect(api.confirm).toHaveBeenCalledWith(expect.objectContaining({ resume_id: 'm2' }));
+  });
+
+  it('confirms the pinned source even if the picker changes after the preview was built', async () => {
+    api.list.mockResolvedValue([master('m1', true, 'DevRel'), master('m2', false, 'SWE')]);
+    api.preview.mockResolvedValue({
+      ...PREVIEW_RESULT,
+      data: { ...PREVIEW_RESULT.data, diff_summary: null },
+    });
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    // The missing-diff dialog is open and the picker is not disabled by page state;
+    // switching it must not redirect the pending confirmation to another master.
+    chooseMaster('SWE', { hidden: true });
+    await act(async () =>
+      screen
+        .getByRole('button', { name: 'tailor.missingDiffDialog.confirmLabel', hidden: true })
+        .click()
+    );
+    expect(api.confirm).toHaveBeenCalledWith(expect.objectContaining({ resume_id: 'm1' }));
+  });
+
+  it('passes the bullet selection summary to the diff modal', async () => {
+    api.list.mockResolvedValue([master('m1', true, 'DevRel')]);
+    api.preview.mockResolvedValue({
+      ...PREVIEW_RESULT,
+      data: {
+        ...PREVIEW_RESULT.data,
+        bullet_selection: {
+          max_per_entry: 3,
+          bullets_before: 9,
+          bullets_after: 6,
+          trimmed_for_fit: 0,
+          scoring: 'llm',
+          page_fit: 'fits',
+          final_pages: 1,
+        },
+      },
+    });
+    await renderPage();
+    await fillJobDescriptionAndGenerate();
+    expect(screen.getByTestId('selection')).toHaveTextContent('6');
+  });
+});
+
+describe('tailor page in agent mode', () => {
+  it('turns Generate into a prompt for the agent that carries the job description', async () => {
+    api.agentMode = true;
+    try {
+      api.list.mockResolvedValue([master('m1', true, 'DevRel')]);
+      await renderPage();
+      expect(screen.getByText('agentPrompt.tailorPageMessage')).toBeInTheDocument();
+      expect(screen.queryByText('tailor.noApiKeyMessage')).toBeNull();
+
+      const job = 'A software engineer role building useful tools with Python and SQL.';
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: job } });
+      await act(async () => screen.getByRole('button', { name: 'agentPrompt.getPrompt' }).click());
+
+      expect(screen.getByRole('dialog', { name: 'agentPrompt.tailor.title' })).toBeInTheDocument();
+      // The test t() returns keys only, so the prompt is the with-job variant's key.
+      expect(screen.getByText('agentPrompt.tailor.promptWithJob')).toBeInTheDocument();
+      expect(api.upload).not.toHaveBeenCalled();
+      expect(api.preview).not.toHaveBeenCalled();
+    } finally {
+      api.agentMode = false;
+    }
+  });
+});

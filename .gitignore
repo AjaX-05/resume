@@ -1,0 +1,176 @@
+# .gitignore (in your-project-root/apps/backend/)
+
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+activate_this.py
+
+# Python Bytecode and Caches
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+uv.lock
+
+# SQLite databases
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# Encryption secret for API keys at rest - NEVER COMMIT
+**/data/.secret_key
+# Sign in with ChatGPT credentials (encrypted) and their refresh lock - NEVER COMMIT
+**/data/chatgpt_credentials.enc
+# save_record() stages the write here; an interrupted process can leave it behind
+**/data/.chatgpt_credentials.enc.*.tmp
+**/data/chatgpt_credentials.lock
+# PDFs the resume-matcher command exports
+**/data/exports/
+# Personal applier vault (name, address, EEO) - NEVER COMMIT
+**/data/vault.json
+# Pipeline config bound to a local DB id - NEVER COMMIT
+**/data/pipeline.json
+# Corporate TLS inspection cert / openssl config - NEVER COMMIT
+**/data/corporate-ca.pem
+**/data/openssl.cnf
+*.pem
+# Local scratch dump of all prompts (for user review only)
+/ALL_PROMPTS.py
+# Graphify knowledge-graph output (auto-regenerable with the graphify skill)
+graphify-out/
+**/graphify-out/
+# Job descriptions saved for a coding agent (see jobs/README.md)
+/jobs/*
+!/jobs/README.md
+
+# Test artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local instance or config files specific to backend
+instance/
+.env # Backend specific environment variables
+
+# Config file with API keys - NEVER COMMIT
+**/config.json
+apps/backend/data/config.json
+
+# cursor related files
+.cursor/
+.cursorrules
+
+# Claude Code — track only CLAUDE.md and settings.json, ignore everything else
+# (skills, subagents, thoughts, prompts, sessions are all personal workflow)
+.claude/*
+!.claude/CLAUDE.md
+!.claude/settings.json
+# Except the resume-matcher skill, which AGENTS.md points every agent to.
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/resume-matcher/
+skills-lock.json
+
+# AI assistant tool folders (personal workflow, not tracked)
+.agents/
+.github/agents/
+.github/skills/
+.github/prompts/
+.github/copilot-instructions.md
+.kilocode/
+.gemini/
+.codex/
+.firecrawl/
+AGENTS.md
+# The root AGENTS.md is shared: it tells agents how to use Resume Matcher.
+!/AGENTS.md
+GEMINI.md
+CODEX.md
+
+.DS_Store
+
+
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+.idea/
+
+# Config file with API keys - NEVER COMMIT
+config.json
+**/config.json
+
+# Agentic E2E monitor — runtime evidence bundles and the local-only skill
+/artifacts/
+/.claude/skills/monitor-e2e/
+
+# Superpowers brainstorming visual-companion scratch (local only)
+/.superpowers/
+
+# Local agent context, not shipped
+/docs/superpowers/
+/docs/agent/
+/docs/portable/
+
+# Job scraper — personal data, auth sessions, discovered jobs (never commit)
+/apps/job-scraper/data/
+/apps/job-scraper/.env
+/apps/job-scraper/.venv/

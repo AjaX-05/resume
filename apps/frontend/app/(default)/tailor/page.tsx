@@ -1,0 +1,942 @@
+'use client';
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Button, buttonClass } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import { Label, labelClass } from '@/components/ui/label';
+import { Alert } from '@/components/ui/alert';
+import { PageFrame } from '@/components/ui/page-frame';
+import { PageHeader } from '@/components/ui/page-header';
+import { LlmSetupAlert } from '@/components/common/llm-setup-alert';
+import { AgentPromptDialog } from '@/components/agent/agent-prompt-dialog';
+import { FadePresence } from '@/components/common/presence';
+import { useResumePreview } from '@/components/common/resume_previewer_context';
+import type { ATSScore, ImprovedResult } from '@/components/common/resume_previewer_context';
+import type { ResumeData } from '@/components/dashboard/resume-component';
+import {
+  uploadJobDescriptions,
+  previewImproveResume,
+  confirmImproveResume,
+  applyKeywords,
+  fetchResumeList,
+  toPageFitSettings,
+  type ForcedKeywordInput,
+  type ResumeListItem,
+} from '@/lib/api/resume';
+import { newProgressId, subscribeToProgress } from '@/lib/api/progress';
+import type { WritingReport } from '@/lib/api/writing';
+import { keywordInText, resumeKeywordText } from '@/lib/utils/keyword-matcher';
+import {
+  DEFAULT_TAILOR_LENGTH,
+  TAILOR_BULLET_CAPS,
+  TAILOR_PAGE_LIMITS,
+  buildPreviewLengthOptions,
+  readTailorLength,
+  writeTailorLength,
+  type TailorBulletCap,
+  type TailorLengthSettings,
+  type TailorPageLimit,
+} from '@/lib/utils/tailor-length-settings';
+import { DEFAULT_TEMPLATE_SETTINGS, type TemplateType } from '@/lib/types/template-settings';
+import { fetchPromptConfig, type PromptOption } from '@/lib/api/config';
+import { getPreviewErrorMessage } from '@/lib/utils/preview-error';
+import { Dropdown } from '@/components/ui/dropdown';
+import { useStatusCache } from '@/lib/context/status-cache';
+import { ListNumbers, SpinnerGap } from '@phosphor-icons/react';
+import { useTranslations } from '@/lib/i18n';
+import { DiffPreviewModal } from '@/components/tailor/diff-preview-modal';
+import { ATSScoreCard } from '@/components/tailor/ats-score-card';
+import {
+  KeywordForcingPanel,
+  MAX_FORCED_KEYWORDS,
+} from '@/components/tailor/keyword-forcing-panel';
+import { TailorProgress } from '@/components/tailor/tailor-progress';
+import { WritingScoreCard } from '@/components/tailor/writing-score-card';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useOperationOwner } from '@/hooks/use-operation-owner';
+import { cn } from '@/lib/utils';
+import { updateApplication } from '@/lib/api/tracker';
+
+// The page is step 1; Generate opens the diff modal, where the user reviews and saves.
+const STEP_KEYS = ['tailor.steps.paste', 'tailor.steps.generate', 'tailor.steps.review'] as const;
+
+const masterLabel = (m: ResumeListItem) => m.title || m.filename || m.resume_id;
+
+export default function TailorPage() {
+  const { t, locale } = useTranslations();
+  const searchParams = useSearchParams();
+  const { begin, isCurrent, invalidate } = useOperationOwner('tailor');
+  const confirmedResponses = useRef(new WeakMap<ImprovedResult, ImprovedResult>());
+  const countedResumes = useRef(new Set<string>());
+  const confirmationBusy = useRef(false);
+
+  const [jobDescription, setJobDescription] = useState('');
+
+  // Allow pre-populating the JD from URL (?jd=<base64>) — used by tracker cards
+  // to send a scraped job's description straight into the tailor flow.
+  // Reactive via useSearchParams so client navigation also triggers it.
+  const jdParam = searchParams.get('jd');
+  useEffect(() => {
+    if (!jdParam) return;
+    try {
+      // Decode base64 → percent-escaped bytes → Unicode string
+      // (symmetric with the tracker card's unescape(encodeURIComponent) encode)
+      const decoded = decodeURIComponent(escape(atob(jdParam)));
+      setJobDescription(decoded);
+    } catch {
+      /* malformed param — ignore */
+    }
+  }, [jdParam]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [masterResumeId, setMasterResumeId] = useState<string | null>(null);
+  const [masters, setMasters] = useState<ResumeListItem[]>([]);
+  // The master a preview was built from; confirm must send this, not the picker's current value.
+  const previewSourceIdRef = useRef<string | null>(null);
+  const [promptOptions, setPromptOptions] = useState<PromptOption[]>([]);
+  const [selectedPromptId, setSelectedPromptId] = useState('keywords');
+  const [promptLoading, setPromptLoading] = useState(false);
+  const hasUserSelectedPrompt = useRef(false);
+  const missingDiffConfirmInFlight = useRef(false);
+
+  // Diff preview modal state
+  const [showDiffModal, setShowDiffModal] = useState(false);
+  const [pendingResult, setPendingResult] = useState<ImprovedResult | null>(null);
+  // The last ATS result stays visible after the diff modal closes; cleared when a new run starts.
+  const [atsResult, setAtsResult] = useState<ATSScore | null>(null);
+  // Template the preview was fitted with; the ATS card warns on two-column layouts.
+  const [atsTemplate, setAtsTemplate] = useState<TemplateType | undefined>(undefined);
+  // ATS score before the last keyword apply; the card shows it as "was".
+  const [atsPrevious, setAtsPrevious] = useState<number | undefined>(undefined);
+  // Writing critique of the last preview, and the resume its paths point into.
+  const [writingResult, setWritingResult] = useState<WritingReport | null>(null);
+  const [writingResume, setWritingResume] = useState<ResumeData | null>(null);
+  // Live stage of the running preview (null until the first update).
+  const [progressStage, setProgressStage] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  // Keywords forced into the pending preview, and the confirmed ones to add to the master.
+  const [forcedKeywords, setForcedKeywords] = useState<string[]>([]);
+  const [masterSkillsToAdd, setMasterSkillsToAdd] = useState<string[]>([]);
+  const [keywordBusy, setKeywordBusy] = useState(false);
+  const [keywordError, setKeywordError] = useState<string | null>(null);
+  const [diffConfirmError, setDiffConfirmError] = useState<string | null>(null);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [showRegenerateDialog, setShowRegenerateDialog] = useState(false);
+  const [showMissingDiffDialog, setShowMissingDiffDialog] = useState(false);
+  const [missingDiffResult, setMissingDiffResult] = useState<ImprovedResult | null>(null);
+  // Page limit / bullet cap for tailoring; loaded from storage after mount.
+  const [tailorLength, setTailorLength] = useState<TailorLengthSettings>(DEFAULT_TAILOR_LENGTH);
+
+  useEffect(() => {
+    setTailorLength(readTailorLength());
+  }, []);
+
+  const updateTailorLength = (patch: Partial<TailorLengthSettings>) => {
+    const next = { ...tailorLength, ...patch };
+    setTailorLength(next);
+    writeTailorLength(next);
+  };
+  const [missingDiffError, setMissingDiffError] = useState<string | null>(null);
+
+  // Elapsed timer for long operations
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startTimer = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setElapsed(0);
+    timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+  }, []);
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+    setElapsed(0);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  const router = useRouter();
+  const { setImprovedData } = useResumePreview();
+  const {
+    status: systemStatus,
+    isLoading: statusLoading,
+    incrementJobs,
+    incrementImprovements,
+    incrementResumes,
+  } = useStatusCache();
+
+  // Check if LLM is configured
+  const isLlmConfigured = !statusLoading && systemStatus?.llm_configured;
+  // Agent mode: the user's coding agent tailors; the button shows a prompt for it.
+  const agentMode = !statusLoading && Boolean(systemStatus?.agent_mode);
+  const [showAgentPrompt, setShowAgentPrompt] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const rows = await fetchResumeList(true);
+        if (cancelled) return;
+        const ready = rows.filter((r) => r.is_master && r.processing_status === 'ready');
+        const storedId = localStorage.getItem('master_resume_id');
+        const initial =
+          ready.find((r) => r.is_default_master) ??
+          ready.find((r) => r.resume_id === storedId) ??
+          ready[0];
+        if (!initial) {
+          router.push('/dashboard');
+          return;
+        }
+        setMasters(ready);
+        setMasterResumeId(initial.resume_id);
+      } catch {
+        if (cancelled) return;
+        const storedId = localStorage.getItem('master_resume_id');
+        if (storedId) setMasterResumeId(storedId);
+        else router.push('/dashboard');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPromptConfig = async () => {
+      setPromptLoading(true);
+      try {
+        const config = await fetchPromptConfig();
+        if (!cancelled) {
+          setPromptOptions(config.prompt_options || []);
+          if (!hasUserSelectedPrompt.current) {
+            setSelectedPromptId(config.default_prompt_id || 'keywords');
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load prompt config', err);
+      } finally {
+        if (!cancelled) {
+          setPromptLoading(false);
+        }
+      }
+    };
+
+    loadPromptConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter') e.stopPropagation();
+  };
+
+  const buildConfirmPayload = (result: ImprovedResult) => {
+    const sourceId = previewSourceIdRef.current ?? masterResumeId;
+    if (!sourceId) {
+      throw new Error('Master resume ID is missing.');
+    }
+    const resumePreview = result.data.resume_preview;
+    if (!resumePreview || typeof resumePreview !== 'object' || Array.isArray(resumePreview)) {
+      throw new Error('Resume preview data is invalid.');
+    }
+    const previewRecord = resumePreview as unknown as Record<string, unknown>;
+    if (
+      !previewRecord.personalInfo ||
+      typeof previewRecord.personalInfo !== 'object' ||
+      Array.isArray(previewRecord.personalInfo)
+    ) {
+      throw new Error('Resume preview data is invalid.');
+    }
+    return {
+      resume_id: sourceId,
+      job_id: result.data.job_id,
+      preview_id: result.data.preview_id ?? null,
+      improved_data: resumePreview as ResumeData,
+      improvements:
+        result.data.improvements?.map((item) => ({
+          suggestion: item.suggestion,
+          lineNumber: typeof item.lineNumber === 'number' ? item.lineNumber : null,
+        })) ?? [],
+      forced_keywords: forcedKeywords,
+      master_skills_to_add: masterSkillsToAdd,
+    };
+  };
+
+  const resetKeywordState = () => {
+    setForcedKeywords([]);
+    setMasterSkillsToAdd([]);
+    setAtsPrevious(undefined);
+    setKeywordError(null);
+    setKeywordBusy(false);
+  };
+
+  const confirmAndNavigate = async (result: ImprovedResult, token: number) => {
+    let confirmed = confirmedResponses.current.get(result);
+    if (!confirmed) {
+      const expiresAt = Date.parse(result.data.preview_expires_at ?? '');
+      if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+        throw new Error('Preview expired');
+      }
+      confirmed = await confirmImproveResume(buildConfirmPayload(result));
+      // Acknowledgement is durable even if a later client effect fails.
+      confirmedResponses.current.set(result, confirmed);
+    }
+    if (!isCurrent(token)) return;
+    const newResumeId = confirmed?.data?.resume_id;
+    if (newResumeId && !countedResumes.current.has(newResumeId)) {
+      countedResumes.current.add(newResumeId);
+      incrementImprovements();
+      incrementResumes();
+    }
+    setImprovedData(confirmed);
+
+    // If we came from a tracker card (via ?appId=…), auto-move it from
+    // "JD" (saved) → "Tailored" (applied), re-point the card at the newly
+    // created tailored resume, and send the user to the review page.
+    const appId = searchParams.get('appId');
+    if (appId) {
+      try {
+        await updateApplication(appId, {
+          status: 'applied',
+          // Critical: swap the master resume_id → the new tailored resume_id
+          // so the review page shows the tailored content + ATS score works.
+          ...(newResumeId ? { resume_id: newResumeId } : {}),
+        });
+      } catch (e) {
+        console.warn('Could not auto-move tracker card:', e);
+      }
+      router.push(`/review/${appId}`);
+      return;
+    }
+
+    router.push(newResumeId ? `/resumes/${newResumeId}` : '/builder');
+  };
+
+  const offerFreshPreview = (failure: unknown): boolean => {
+    if (!(failure instanceof Error) || !/preview expired|status (400|409)\b/i.test(failure.message))
+      return false;
+    invalidate();
+    confirmationBusy.current = false;
+    missingDiffConfirmInFlight.current = false;
+    setIsConfirming(false);
+    setIsLoading(false);
+    setShowDiffModal(false);
+    setShowMissingDiffDialog(false);
+    setPendingResult(null);
+    setMissingDiffResult(null);
+    setDiffConfirmError(null);
+    setMissingDiffError(null);
+    setError(t('tailor.errors.previewUnavailable'));
+    setShowRegenerateDialog(true);
+    return true;
+  };
+
+  const getGenerateValidationError = (trimmedDescription: string) => {
+    if (!trimmedDescription) return null;
+    if (trimmedDescription.length < 50) {
+      return t('tailor.errors.jobDescriptionTooShort');
+    }
+    return null;
+  };
+
+  const runGenerate = async (resumeId: string, description: string, token: number) => {
+    setAtsResult(null);
+    setWritingResult(null);
+    setWritingResume(null);
+    resetKeywordState();
+    setProgressStage(null);
+    setIsGenerating(true);
+    const progressId = newProgressId();
+    const stopProgress = subscribeToProgress(progressId, (stage) => {
+      if (isCurrent(token)) setProgressStage(stage);
+    });
+    try {
+      // 1. Upload Job Description
+      // The API expects an array of strings
+      previewSourceIdRef.current = resumeId;
+      const jobId = await uploadJobDescriptions([description], resumeId);
+      if (!isCurrent(token)) return;
+      incrementJobs(); // Update cached counter
+
+      // 2. Preview Resume
+      // Fit pages the way the source resume is formatted.
+      const templateSettings =
+        masters.find((m) => m.resume_id === resumeId)?.template_settings ??
+        DEFAULT_TEMPLATE_SETTINGS;
+      const result = await previewImproveResume(resumeId, jobId, selectedPromptId, {
+        ...buildPreviewLengthOptions(tailorLength, toPageFitSettings(templateSettings, locale)),
+        progressId,
+      });
+      if (!isCurrent(token)) return;
+
+      if (!result?.data?.diff_summary || !result?.data?.detailed_changes) {
+        console.warn('Diff data missing for tailor preview; requesting user confirmation.');
+        setDiffConfirmError(null);
+        setPendingResult(null);
+        setShowDiffModal(false);
+        setMissingDiffError(null);
+        setMissingDiffResult(result);
+        setShowMissingDiffDialog(true);
+        return;
+      }
+
+      // 3. Show diff preview modal
+      setDiffConfirmError(null);
+      setMissingDiffError(null);
+      setPendingResult(result);
+      setAtsResult(result.data.ats_score ?? null);
+      setAtsTemplate(templateSettings.template);
+      setWritingResult(result.data.writing ?? null);
+      setWritingResume((result.data.resume_preview as ResumeData) ?? null);
+      setShowDiffModal(true);
+    } catch (err) {
+      if (!isCurrent(token)) return;
+      console.error(err);
+      setError(getPreviewErrorMessage(err, t));
+    } finally {
+      stopProgress();
+      if (isCurrent(token)) setIsGenerating(false);
+    }
+  };
+
+  // Work chosen keywords into the pending preview; the result replaces it.
+  const handleApplyKeywords = async (keywords: ForcedKeywordInput[], addToMaster: boolean) => {
+    const current = pendingResult;
+    const sourceId = previewSourceIdRef.current;
+    if (!current?.data.preview_id || !sourceId || keywordBusy || confirmationBusy.current) return;
+    const token = begin();
+    if (token === null) return;
+    setKeywordBusy(true);
+    setKeywordError(null);
+    try {
+      const next = await applyKeywords({
+        resume_id: sourceId,
+        job_id: current.data.job_id,
+        preview_id: current.data.preview_id,
+        improved_data: current.data.resume_preview as ResumeData,
+        keywords,
+        prompt_id: selectedPromptId,
+      });
+      if (!isCurrent(token)) return;
+      const placed = next.data.forced_keywords ?? [];
+      const attested = new Set(keywords.filter((k) => k.attested).map((k) => k.keyword));
+      setForcedKeywords((prev) => [...new Set([...prev, ...placed])]);
+      if (addToMaster) {
+        setMasterSkillsToAdd((prev) => [
+          ...new Set([...prev, ...placed.filter((k) => attested.has(k))]),
+        ]);
+      }
+      setAtsPrevious(atsResult?.overall_score);
+      setAtsResult(next.data.ats_score ?? null);
+      if (next.data.writing) {
+        setWritingResult({
+          ...next.data.writing,
+          critic_notes: writingResult?.critic_notes ?? [],
+          rewritten_paths: writingResult?.rewritten_paths ?? [],
+          rejected_rewrites: writingResult?.rejected_rewrites ?? 0,
+        });
+      }
+      setWritingResume((next.data.resume_preview as ResumeData) ?? null);
+      // Earlier applications stay listed: their keywords are still in the resume.
+      const latest = next.data.keyword_placements ?? [];
+      const earlier = (current.data.keyword_placements ?? []).filter(
+        (p) => !latest.some((n) => n.keyword === p.keyword)
+      );
+      setPendingResult({
+        ...next,
+        data: { ...next.data, keyword_placements: [...earlier, ...latest] },
+      });
+    } catch (err) {
+      if (!isCurrent(token)) return;
+      console.error(err);
+      if (offerFreshPreview(err)) return;
+      setKeywordError(t('tailor.forceKeywords.error'));
+    } finally {
+      if (isCurrent(token)) setKeywordBusy(false);
+    }
+  };
+
+  const handleGenerate = async () => {
+    const trimmedDescription = jobDescription.trim();
+    if (!trimmedDescription || !masterResumeId) return;
+    const validationError = getGenerateValidationError(trimmedDescription);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    const resumeId = masterResumeId;
+    const token = begin();
+    if (token === null) return;
+    setIsLoading(true);
+    setError(null);
+    startTimer();
+    try {
+      await runGenerate(resumeId, trimmedDescription, token);
+    } finally {
+      if (isCurrent(token)) {
+        setIsLoading(false);
+        stopTimer();
+      }
+    }
+  };
+
+  // User confirms changes
+  const handleConfirmChanges = async () => {
+    if (!pendingResult || confirmationBusy.current || keywordBusy) return;
+    const token = begin();
+    if (token === null) return;
+    confirmationBusy.current = true;
+
+    setIsConfirming(true);
+    setError(null);
+    setDiffConfirmError(null);
+
+    try {
+      await confirmAndNavigate(pendingResult, token);
+      if (!isCurrent(token)) return;
+      setShowDiffModal(false);
+      setPendingResult(null);
+    } catch (err) {
+      if (!isCurrent(token)) return;
+      console.error(err);
+      if (offerFreshPreview(err)) return;
+      const errorMessage = t('tailor.errors.failedToConfirm');
+      setError(errorMessage);
+      setDiffConfirmError(errorMessage);
+    } finally {
+      if (isCurrent(token)) {
+        confirmationBusy.current = false;
+        setIsConfirming(false);
+      }
+    }
+  };
+
+  // User rejects changes
+  const handleRejectChanges = () => {
+    if (confirmationBusy.current) return;
+    invalidate();
+    resetKeywordState();
+    confirmationBusy.current = false;
+    setIsConfirming(false);
+    setShowDiffModal(false);
+    setPendingResult(null);
+    setDiffConfirmError(null);
+    setShowRegenerateDialog(true);
+  };
+
+  const handleCloseDiffModal = () => {
+    if (confirmationBusy.current) return;
+    invalidate();
+    resetKeywordState();
+    confirmationBusy.current = false;
+    setIsConfirming(false);
+    setShowDiffModal(false);
+    setPendingResult(null);
+    setDiffConfirmError(null);
+  };
+
+  const handleCloseMissingDiffDialog = () => {
+    invalidate();
+    setIsLoading(false);
+    setShowMissingDiffDialog(false);
+    setMissingDiffResult(null);
+    setMissingDiffError(null);
+    missingDiffConfirmInFlight.current = false;
+  };
+
+  const handleMissingDiffConfirm = async () => {
+    if (!missingDiffResult || isLoading || missingDiffConfirmInFlight.current) return;
+    const token = begin();
+    if (token === null) return;
+    missingDiffConfirmInFlight.current = true;
+    setIsLoading(true);
+    setError(null);
+    setMissingDiffError(null);
+    try {
+      await confirmAndNavigate(missingDiffResult, token);
+      if (!isCurrent(token)) return;
+      handleCloseMissingDiffDialog();
+    } catch (err) {
+      if (!isCurrent(token)) return;
+      console.error(err);
+      if (offerFreshPreview(err)) return;
+      const errorMessage = t('tailor.errors.failedToConfirm');
+      setError(errorMessage);
+      setMissingDiffError(errorMessage);
+    } finally {
+      if (isCurrent(token)) {
+        missingDiffConfirmInFlight.current = false;
+        setIsLoading(false);
+      }
+    }
+  };
+
+  const handleRegenerateConfirm = async () => {
+    setShowRegenerateDialog(false);
+    const trimmedDescription = jobDescription.trim();
+    if (!trimmedDescription || !masterResumeId) return;
+    const validationError = getGenerateValidationError(trimmedDescription);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    const resumeId = masterResumeId;
+    const token = begin();
+    if (token === null) return;
+    setIsLoading(true);
+    setError(null);
+    startTimer();
+    try {
+      await runGenerate(resumeId, trimmedDescription, token);
+    } finally {
+      if (isCurrent(token)) {
+        setIsLoading(false);
+        stopTimer();
+      }
+    }
+  };
+
+  // Missing keywords the pending preview still lacks (forced ones drop off the chips).
+  const previewText = pendingResult?.data?.resume_preview
+    ? resumeKeywordText(pendingResult.data.resume_preview as ResumeData)
+    : '';
+  const unplacedKeywords = (keywords: string[]) =>
+    keywords.filter((k) => !forcedKeywords.includes(k) && !keywordInText(k, previewText));
+
+  return (
+    <PageFrame
+      width="narrow"
+      effect="bitrate"
+      effectIntensity={isLoading ? 'active' : 'idle'}
+      className="my-auto"
+    >
+      <PageHeader className="p-6 md:p-6">
+        <PageHeader.Back href="/dashboard">{t('common.back')}</PageHeader.Back>
+        <PageHeader.Title>{t('tailor.heroTitle')}</PageHeader.Title>
+        <PageHeader.Subtitle>{t('tailor.subtitle')}</PageHeader.Subtitle>
+        <PageHeader.Actions>
+          <Link href="/queue" className={buttonClass({ variant: 'outline', size: 'sm' })}>
+            <ListNumbers aria-hidden="true" />
+            {t('nav.queue')}
+          </Link>
+        </PageHeader.Actions>
+      </PageHeader>
+
+      <ol
+        aria-label={t('tailor.steps.label')}
+        className="grid grid-cols-1 divide-y divide-ink border-b border-ink px-6 sm:grid-cols-3 sm:divide-x sm:divide-y-0"
+      >
+        {STEP_KEYS.map((key, index) => {
+          const current = index === 0;
+          return (
+            <li
+              key={key}
+              aria-current={current ? 'step' : undefined}
+              className="flex items-center gap-3 py-2 sm:px-4 sm:first:pl-0 sm:last:pr-0"
+            >
+              <span
+                className={cn(
+                  'flex size-6 shrink-0 items-center justify-center border border-ink font-mono text-xs font-bold tabular-nums',
+                  current ? 'bg-ink text-white' : 'text-ink'
+                )}
+              >
+                {index + 1}
+              </span>
+              <span
+                className={cn(
+                  'font-mono text-xs uppercase tracking-wider',
+                  current ? 'font-bold text-ink' : 'text-steel'
+                )}
+              >
+                {t(key)}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="p-6">
+        <div className="space-y-3">
+          {agentMode && (
+            <Alert tone="info" title={t('agentPrompt.modeTitle')}>
+              {t('agentPrompt.tailorPageMessage')}
+            </Alert>
+          )}
+
+          {/* LLM Not Configured Warning */}
+          {!statusLoading && !isLlmConfigured && !agentMode && (
+            <LlmSetupAlert
+              titleKey="tailor.setupRequiredTitle"
+              messageKey="tailor.noApiKeyMessage"
+              actionKey="tailor.configureApiKey"
+            />
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            {masters.length > 1 ? (
+              <Dropdown
+                label={t('tailor.selectResume')}
+                description={t('tailor.selectResumeDescription')}
+                options={masters.map((m) => ({ id: m.resume_id, label: masterLabel(m) }))}
+                value={masterResumeId ?? ''}
+                onChange={setMasterResumeId}
+                disabled={isLoading || promptLoading || showDiffModal}
+              />
+            ) : (
+              (masters.length === 1 || !masterResumeId) && (
+                <div className="space-y-1">
+                  <span className={cn('block', labelClass)}>{t('tailor.tailoringLabel')}</span>
+                  <p className="text-sm text-ink-soft">{t('tailor.selectResumeDescription')}</p>
+                  <p className="flex min-h-10 items-center font-mono text-sm font-bold break-words text-ink">
+                    {masters.length === 1 ? masterLabel(masters[0]) : t('common.loading')}
+                  </p>
+                </div>
+              )
+            )}
+
+            <Dropdown
+              options={
+                promptOptions.length > 0
+                  ? promptOptions.map((opt) => ({
+                      id: opt.id,
+                      label: t(`tailor.promptOptions.${opt.id}.label`),
+                      description: t(`tailor.promptOptions.${opt.id}.description`),
+                    }))
+                  : [
+                      {
+                        id: 'nudge',
+                        label: t('tailor.promptOptions.nudge.label'),
+                        description: t('tailor.promptOptions.nudge.description'),
+                      },
+                      {
+                        id: 'keywords',
+                        label: t('tailor.promptOptions.keywords.label'),
+                        description: t('tailor.promptOptions.keywords.description'),
+                      },
+                      {
+                        id: 'full',
+                        label: t('tailor.promptOptions.full.label'),
+                        description: t('tailor.promptOptions.full.description'),
+                      },
+                      {
+                        id: 'heavy',
+                        label: t('tailor.promptOptions.heavy.label'),
+                        description: t('tailor.promptOptions.heavy.description'),
+                      },
+                    ]
+              }
+              value={selectedPromptId}
+              onChange={(value) => {
+                hasUserSelectedPrompt.current = true;
+                setSelectedPromptId(value);
+              }}
+              label={t('tailor.promptLabel')}
+              description={t('tailor.promptDescription')}
+              disabled={isLoading || promptLoading}
+            />
+          </div>
+
+          <FadePresence show={selectedPromptId === 'heavy'}>
+            <Alert tone="warning">{t('tailor.heavyWarning')}</Alert>
+          </FadePresence>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Dropdown
+              options={TAILOR_PAGE_LIMITS.map((limit) => ({
+                id: String(limit ?? 'none'),
+                label: t(`tailor.length.pageLimitOptions.${limit ?? 'none'}`),
+              }))}
+              value={String(tailorLength.maxPages ?? 'none')}
+              onChange={(value) =>
+                updateTailorLength({
+                  maxPages: (value === 'none' ? null : Number(value)) as TailorPageLimit,
+                })
+              }
+              label={t('tailor.length.pageLimitLabel')}
+              description={t('tailor.length.pageLimitDescription')}
+              disabled={isLoading}
+            />
+            <Dropdown
+              options={TAILOR_BULLET_CAPS.map((cap) => ({
+                id: String(cap ?? 'all'),
+                label: t(`tailor.length.bulletOptions.${cap ?? 'all'}`),
+              }))}
+              value={String(tailorLength.maxBulletsPerEntry ?? 'all')}
+              onChange={(value) =>
+                updateTailorLength({
+                  maxBulletsPerEntry: (value === 'all' ? null : Number(value)) as TailorBulletCap,
+                })
+              }
+              label={t('tailor.length.bulletsLabel')}
+              description={t('tailor.length.bulletsDescription')}
+              disabled={isLoading}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="job-description">{t('tailor.pasteJobDescription')}</Label>
+            <div className="relative">
+              <Textarea
+                id="job-description"
+                aria-describedby="job-description-hint"
+                placeholder={t('tailor.jobDescriptionPlaceholder')}
+                className="min-h-48 resize-none p-4 pb-8"
+                value={jobDescription}
+                onChange={(e) => setJobDescription(e.target.value)}
+                onKeyDown={handleTextareaKeyDown}
+                disabled={isLoading}
+              />
+              <div className="absolute bottom-2 right-2 font-mono text-xs tabular-nums text-steel pointer-events-none">
+                {t('tailor.charactersCount', { count: jobDescription.length })}
+              </div>
+            </div>
+            <p id="job-description-hint" className="text-sm text-ink-soft">
+              {t('tailor.jobDescriptionHint')}
+            </p>
+          </div>
+
+          <FadePresence show={!!error}>
+            <Alert tone="error">{error}</Alert>
+          </FadePresence>
+
+          <Button
+            size="lg"
+            onClick={agentMode ? () => setShowAgentPrompt(true) : handleGenerate}
+            disabled={
+              isLoading ||
+              statusLoading ||
+              !jobDescription.trim() ||
+              !(isLlmConfigured || agentMode) ||
+              !masterResumeId
+            }
+            className="w-full"
+          >
+            {isLoading ? (
+              <>
+                <SpinnerGap className="w-5 h-5 animate-spin" />
+                {t('common.processing')}
+                {elapsed > 0 && <span className="text-xs tabular-nums">{elapsed}s</span>}
+              </>
+            ) : statusLoading ? (
+              <>
+                <SpinnerGap className="w-5 h-5 animate-spin" />
+                {t('common.checking')}
+              </>
+            ) : agentMode ? (
+              t('agentPrompt.getPrompt')
+            ) : !isLlmConfigured ? (
+              t('tailor.configureApiKeyFirst')
+            ) : (
+              t('tailor.generateTailored')
+            )}
+          </Button>
+
+          {isGenerating && (
+            <TailorProgress
+              stage={progressStage}
+              elapsed={elapsed}
+              withSelection={
+                tailorLength.maxPages != null || tailorLength.maxBulletsPerEntry != null
+              }
+              withRewrite={selectedPromptId !== 'nudge'}
+            />
+          )}
+
+          {/* ATS Score Breakdown: the last preview's score, kept after the diff modal closes */}
+          {atsResult && (
+            <ATSScoreCard atsScore={atsResult} template={atsTemplate} previousScore={atsPrevious} />
+          )}
+          {writingResult && <WritingScoreCard writing={writingResult} resume={writingResume} />}
+        </div>
+      </div>
+
+      <AgentPromptDialog
+        task={showAgentPrompt ? 'tailor' : null}
+        resumeId={masterResumeId ?? ''}
+        jobDescription={jobDescription}
+        onClose={() => setShowAgentPrompt(false)}
+      />
+
+      {/* Diff preview modal */}
+      {showDiffModal && pendingResult && (
+        <DiffPreviewModal
+          isOpen={showDiffModal}
+          isConfirming={isConfirming}
+          onClose={handleCloseDiffModal}
+          onReject={handleRejectChanges}
+          onConfirm={handleConfirmChanges}
+          diffSummary={pendingResult?.data?.diff_summary}
+          detailedChanges={pendingResult?.data?.detailed_changes}
+          errorMessage={diffConfirmError ?? undefined}
+          selectionSummary={pendingResult?.data?.bullet_selection}
+          heavyMode={selectedPromptId === 'heavy'}
+          actionsDisabled={keywordBusy}
+          placements={pendingResult?.data?.keyword_placements}
+          scoreChange={
+            atsPrevious != null && atsResult
+              ? { before: atsPrevious, after: atsResult.overall_score }
+              : null
+          }
+          resume={pendingResult?.data?.resume_preview as ResumeData | undefined}
+          keywordPanel={
+            atsResult && pendingResult?.data?.preview_id ? (
+              <KeywordForcingPanel
+                unsupported={unplacedKeywords(atsResult.missing_keywords)}
+                supported={unplacedKeywords(atsResult.injectable_keywords)}
+                onApply={(keywords, addToMaster) => void handleApplyKeywords(keywords, addToMaster)}
+                busy={keywordBusy}
+                error={keywordError}
+                remaining={Math.max(0, MAX_FORCED_KEYWORDS - forcedKeywords.length)}
+              />
+            ) : null
+          }
+        />
+      )}
+
+      <ConfirmDialog
+        open={showRegenerateDialog}
+        onOpenChange={setShowRegenerateDialog}
+        title={t('tailor.regenerateDialog.title')}
+        description={t('tailor.regenerateDialog.description')}
+        confirmLabel={t('tailor.regenerateDialog.confirmLabel')}
+        cancelLabel={t('common.cancel')}
+        variant="warning"
+        onConfirm={handleRegenerateConfirm}
+      />
+
+      <ConfirmDialog
+        open={showMissingDiffDialog}
+        onOpenChange={(open) => {
+          if (!open && !missingDiffConfirmInFlight.current) {
+            handleCloseMissingDiffDialog();
+          }
+        }}
+        title={t('tailor.missingDiffDialog.title')}
+        description={t('tailor.missingDiffDialog.description')}
+        confirmLabel={t('tailor.missingDiffDialog.confirmLabel')}
+        cancelLabel={t('common.cancel')}
+        variant="warning"
+        closeOnConfirm={false}
+        onConfirm={handleMissingDiffConfirm}
+        onCancel={() => {
+          if (!missingDiffConfirmInFlight.current) handleCloseMissingDiffDialog();
+        }}
+        confirmDisabled={isLoading || !missingDiffResult}
+        cancelDisabled={isLoading}
+        errorMessage={missingDiffError ?? undefined}
+      />
+    </PageFrame>
+  );
+}

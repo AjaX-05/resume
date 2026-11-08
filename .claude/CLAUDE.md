@@ -1,0 +1,222 @@
+# CLAUDE.md - Resume Matcher
+
+> **Context file for Claude Code.** Full documentation at [docs/agent/README.md](../docs/agent/README.md).
+
+---
+
+## Project Overview
+
+Resume Matcher is an AI-powered application for tailoring resumes to job descriptions, with a Kanban Application Tracker for managing the job-application pipeline.
+
+| Layer | Stack |
+|-------|-------|
+| **Backend** | FastAPI + Python 3.13+, LiteLLM (multi-provider AI) |
+| **Frontend** | Next.js 16 + React 19, Tailwind CSS v4 |
+| **Database** | SQLite (SQLAlchemy 2.0 async / aiosqlite) |
+| **PDF** | Headless Chromium via Playwright |
+
+---
+
+## First Steps
+
+Before exploring code, read [docs/agent/README.md](../docs/agent/README.md) for project orientation.
+
+---
+
+## Non-Negotiable Rules
+
+1. **All frontend UI changes** MUST follow [Swiss International Style](../docs/portable/swiss-design-system/README.md) — see [tokens](../docs/portable/swiss-design-system/tokens.md), [components](../docs/portable/swiss-design-system/components.md), [anti-patterns](../docs/portable/swiss-design-system/anti-patterns.md)
+2. **All Python functions** MUST have type hints
+3. **Run `npm run lint`** before committing frontend changes
+4. **Run `npm run format`** (Oxfmt) before committing
+5. **Log detailed errors server-side**, return generic messages to clients
+6. **Do NOT modify** `.github/workflows/` files without explicit request
+
+---
+
+## Essential Commands
+
+```bash
+# Backend (from repo root)
+cd apps/backend
+uv sync --extra dev                                  # Install Python deps (incl. test deps)
+uv run uvicorn app.main:app --reload --port 8000     # FastAPI on :8000
+uv run pytest                                        # Run backend tests (~444; LLM evals excluded)
+
+# Frontend (from repo root, in a separate terminal)
+cd apps/frontend
+npm install                                          # Install Node.js dependencies
+npm run dev                                          # Next.js on :3000
+npm run test                                         # Run frontend tests (vitest)
+
+# Quality checks (from apps/frontend)
+npm run lint          # Lint frontend
+npm run format        # Format with Oxfmt
+
+# Build (from apps/frontend)
+npm run build
+```
+
+---
+
+## Project Structure
+
+```
+apps/
+├── backend/                 # FastAPI + Python
+│   ├── app/
+│   │   ├── main.py          # Entry point
+│   │   ├── config.py        # Environment settings
+│   │   ├── database.py      # Async SQLAlchemy/SQLite facade
+│   │   ├── models.py        # SQLAlchemy ORM models (Resume/Job/Improvement/Application/ApiKey)
+│   │   ├── db_engine.py     # Async + sync SQLite engines (WAL/FK pragmas)
+│   │   ├── crypto.py        # Fernet encrypt/decrypt for API keys at rest
+│   │   ├── llm.py           # LiteLLM wrapper
+│   │   ├── routers/         # API endpoints (incl. applications.py = tracker)
+│   │   ├── services/        # Business logic
+│   │   ├── schemas/         # Pydantic models (incl. applications.py)
+│   │   ├── prompts/         # LLM prompt templates
+│   │   └── scripts/         # One-time TinyDB→SQLite migration (runs on startup)
+│   └── data/                # resume_matcher.db (SQLite) + encrypted API keys + .secret_key
+│
+└── frontend/                # Next.js + React
+    ├── app/                 # Pages (dashboard, builder, tailor, tracker, print)
+    ├── components/          # UI components (incl. tracker/)
+    ├── lib/                 # Utilities, API client (incl. api/tracker.ts)
+    ├── hooks/               # Custom React hooks
+    └── messages/            # i18n translations (en, es, fr, ja, ko, pt-BR, zh)
+```
+
+---
+
+## Documentation by Task
+
+### For Backend Changes
+1. [Backend guide](../docs/agent/architecture/backend-guide.md) - Architecture, modules, services
+2. [API contracts](../docs/agent/apis/front-end-apis.md) - API specifications
+3. [LLM integration](../docs/agent/llm-integration.md) - Multi-provider AI support
+
+### For Frontend Changes
+1. [Frontend workflow](../docs/agent/architecture/frontend-workflow.md) - User flow, components
+2. [Swiss design system pack](../docs/portable/swiss-design-system/README.md) - **REQUIRED** Swiss International Style (portable pack)
+3. [Next.js performance pack](../docs/portable/nextjs-performance/README.md) - **REQUIRED** Next.js 15 perf patterns (portable pack)
+4. [Coding standards](../docs/agent/coding-standards.md) - Frontend conventions
+
+### For Testing
+1. [Testing strategy](../docs/agent/testing-strategy.md) - Current-state assessment, framework, phased plan, how to run + how we verify (anti-theater)
+
+### For Template/PDF Changes
+1. [PDF template guide](../docs/agent/design/pdf-template-guide.md) - PDF rendering
+2. [Template system](../docs/agent/design/template-system.md) - Resume templates
+3. [Resume templates](../docs/agent/features/resume-templates.md) - Template types & controls
+
+### For Features
+| Feature | Documentation |
+|---------|---------------|
+| Application tracker | [application-tracker.md](../docs/agent/features/application-tracker.md) |
+| Custom sections | [custom-sections.md](../docs/agent/features/custom-sections.md) |
+| Resume templates | [resume-templates.md](../docs/agent/features/resume-templates.md) |
+| i18n | [i18n.md](../docs/agent/features/i18n.md) |
+| AI enrichment | [enrichment.md](../docs/agent/features/enrichment.md) |
+| JD matching | [jd-match.md](../docs/agent/features/jd-match.md) |
+| MCP server | [mcp-server.md](../docs/agent/features/mcp-server.md) |
+| ATS parse-check | [ats-parse-check.md](../docs/agent/features/ats-parse-check.md) |
+| PostgreSQL backend | [postgres-backend.md](../docs/agent/features/postgres-backend.md) |
+
+---
+
+## Code Patterns
+
+### Backend Error Handling
+```python
+except Exception as e:
+    logger.error(f"Operation failed: {e}")
+    raise HTTPException(status_code=500, detail="Operation failed. Please try again.")
+```
+
+### Frontend Textarea Fix
+All textareas need Enter key handling:
+```tsx
+const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  if (e.key === 'Enter') e.stopPropagation();
+};
+```
+
+### Mutable Defaults (Python)
+Always use `copy.deepcopy()` for mutable defaults:
+```python
+import copy
+data = copy.deepcopy(DEFAULT_DATA)  # Correct
+# data = DEFAULT_DATA  # Wrong - shared state bug
+```
+
+---
+
+## Testing
+
+Both apps have real test suites, and **tests are in scope** (deliberate testing initiative — full plan in [docs/agent/testing-strategy.md](../docs/agent/testing-strategy.md)).
+
+| Suite | Stack | Run |
+|-------|-------|-----|
+| Backend | pytest + pytest-asyncio + httpx + respx | `cd apps/backend && uv run pytest` |
+| Frontend | vitest + Testing Library (jsdom) | `cd apps/frontend && npm run test` |
+
+- **Backend layers:** `tests/unit` (pure logic), `tests/service` (mocked LLM), `tests/integration` (real routers via httpx ASGI), `tests/evals` (prompt-quality scorers + a gated LLM-judge — excluded by default; run with `uv run pytest -m eval`).
+- **Local push gate (not CI):** a `pre-push` hook (`.githooks/pre-push`) runs the backend suite + a locale-parity check and **blocks red pushes**. Activate once per clone: `git config core.hooksPath .githooks`. We deliberately avoid a GitHub Actions PR gate (high external-PR volume) — see [`.githooks/README.md`](../.githooks/README.md).
+- Keep tests **deterministic and anti-theater**: a test must fail when its target breaks, and the default suites make no real network/LLM calls.
+
+---
+
+## Design System Quick Reference
+
+| Element | Value |
+|---------|-------|
+| Canvas background (`canvas`) | `#F0F0E8` |
+| White (cards, inputs, dialogs) | `#FFFFFF` |
+| Ink (headings, borders) | `#000000` |
+| Body text (`ink-soft`) | `#3D424C` |
+| Steel (secondary text; never on `panel`) | `#696D75` |
+| `paper` / `panel` / `panel-hover` | `#F5F5F0` / `#E5E5E0` / `#D8D8D2` |
+| Hyper Blue (`primary`, links) | `#1D4ED8` |
+| Signal Green (`success`) | `#127E3B` |
+| Alert Orange (`warning` fill, ink text only) | `#F97316` |
+| `warning-text` (orange labels and icons) | `#B44F02` |
+| Alert Red (`destructive`) | `#D61E21` |
+| Alert tints (`info`/`success`/`warning`/`destructive`-tint) | `#EFF6FF` / `#F0FDF4` / `#FFF7ED` / `#FEF2F2` |
+| Headers font | `font-serif` (Tailwind default stack) |
+| Body font | `font-sans` (Helvetica, Arial) |
+| Label / metadata font | `font-mono` (resolves to Space Grotesk) |
+| Borders | `rounded-none`; 1px ink controls, 2px alerts |
+| Shadows | Hard, by role. Solid ink: `shadow-sw-sm` controls, `-default` menus and popovers, `-lg` dialogs and `PageFrame`. Translucent ink: `shadow-sw-nested` for every card or box inside a frame or dialog |
+| Motion | `import { m } from 'motion/react'` only; feedback only |
+| Drift guard | `cd apps/frontend && npm run guard -- <path>` |
+
+Full token set and rules: [Swiss design system pack](../docs/portable/swiss-design-system/README.md); frontend specifics in [`apps/frontend/CLAUDE.md`](../apps/frontend/CLAUDE.md).
+
+---
+
+## Definition of Done
+
+Before completing a task:
+
+- [ ] Code compiles without errors
+- [ ] Backend tests pass (`uv run pytest`); frontend tests pass (`npm run test`)
+- [ ] `npm run lint` passes
+- [ ] UI changes follow Swiss International Style
+- [ ] Python functions have type hints
+- [ ] Schema/prompt changes documented
+- [ ] New behavior covered by a deterministic test (it must fail if the behavior breaks)
+
+---
+
+## Out of Scope
+
+Do NOT modify without explicit request:
+- `.github/workflows/` files
+- CI/CD configuration
+- Docker build behavior
+- Existing tests (removal/disabling)
+
+---
+
+> **Full agent documentation**: [docs/agent/README.md](../docs/agent/README.md)

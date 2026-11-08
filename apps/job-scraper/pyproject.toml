@@ -1,0 +1,16 @@
+[project]
+name = "job-scraper"
+version = "0.1.0"
+description = "Automated job discovery pipeline for Resume Matcher"
+requires-python = ">=3.13"
+dependencies = [
+    "firecrawl-py>=4.0.0",
+    "playwright>=1.63.0",
+    "apscheduler>=3.11.0",
+    "python-dotenv>=1.2.4",
+    "httpx>=0.28.0",
+    "pydantic>=2.14.0",
+    "pydantic-settings>=2.15.0",
+    "truststore>=0.10.0",
+]
+

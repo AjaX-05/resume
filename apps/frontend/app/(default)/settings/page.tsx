@@ -1,0 +1,1766 @@
+'use client';
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Image from 'next/image';
+import { AnimatePresence, m } from 'motion/react';
+import {
+  fetchLlmConfig,
+  updateLlmConfig,
+  testLlmConnection,
+  fetchFeatureConfig,
+  updateFeatureConfig,
+  fetchPromptConfig,
+  updatePromptConfig,
+  clearAllApiKeys,
+  resetDatabase,
+  PROVIDER_INFO,
+  fetchFeaturePrompts,
+  updateFeaturePrompts,
+  FeaturePromptsError,
+  fetchApiKeyStatus,
+  updateApiKeys,
+  deleteApiKey,
+  llmProviderToKeyProvider,
+  API_KEY_PROVIDER_INFO,
+  API_KEY_REQUIRED_FOR_ENDPOINT,
+  LlmConfigError,
+  type LLMConfigUpdate,
+  type LLMProvider,
+  type LLMHealthCheck,
+  type PromptOption,
+  type ReasoningEffort,
+  type FeaturePromptsUpdate,
+  type ApiKeyProviderStatus,
+  type ApiKeyProvider,
+} from '@/lib/api/config';
+import { API_URL } from '@/lib/api/client';
+import { CHATGPT_RETURN_OUTCOMES, type ChatGptReturnOutcome } from '@/lib/api/chatgpt';
+import { ChatGptConnection } from '@/components/settings/chatgpt-connection';
+import {
+  AGENT_SETUP_URL,
+  SubscriptionRiskDialog,
+  type SubscriptionProvider,
+} from '@/components/settings/subscription-risk-dialog';
+import { getVersionString } from '@/lib/config/version';
+import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { useStatusCache } from '@/lib/context/status-cache';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import { Alert } from '@/components/ui/alert';
+import { StatusIndicator } from '@/components/ui/status-indicator';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import { BrandIcon, hasBrandIcon } from '@/components/ui/brand-icon';
+import { PageFrame } from '@/components/ui/page-frame';
+import { PageHeader } from '@/components/ui/page-header';
+import { SettingsAbout, SettingsSupportStrip } from '@/components/settings/community';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { Dropdown } from '@/components/ui/dropdown';
+import {
+  FloppyDisk,
+  Key,
+  Database,
+  Pulse,
+  SpinnerGap,
+  Check,
+  ArrowsClockwise,
+  HardDrives,
+  FileText,
+  Briefcase,
+  Clock,
+  SlidersHorizontal,
+  Globe,
+  Monitor,
+  Trash,
+  Warning,
+  ArrowSquareOut,
+} from '@phosphor-icons/react';
+import { useLanguage } from '@/lib/context/language-context';
+import { useTranslations } from '@/lib/i18n';
+import { DURATION } from '@/lib/motion';
+import { ATTACHMENT_DRAFT_STORAGE_PREFIX } from '@/lib/utils/attachment-draft-storage';
+import { RESUME_DRAFT_STORAGE_PREFIX, safeStorage } from '@/lib/utils/resume-draft-storage';
+import type { SupportedLanguage } from '@/lib/api/config';
+import type { Locale } from '@/i18n/config';
+import { useEffectsEnabled, useSetEffectsEnabled } from '@/lib/context/effects-context';
+
+type Status = 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'testing';
+
+const PROVIDERS: LLMProvider[] = [
+  'openai',
+  'openai_compatible',
+  'azure_foundry',
+  'anthropic',
+  'openrouter',
+  'gemini',
+  'deepseek',
+  'groq',
+  'ollama',
+  'claude_cli',
+  'chatgpt',
+  'agent',
+];
+
+/** Picker labels translated instead of derived from PROVIDER_INFO's English name. */
+const SHORT_NAME_KEYS: Partial<Record<LLMProvider, string>> = {
+  claude_cli: 'settings.llmConfiguration.claudeCliShortName',
+  chatgpt: 'settings.llmConfiguration.chatgptShortName',
+  agent: 'settings.llmConfiguration.agentShortName',
+};
+const FULL_NAME_KEYS: Partial<Record<LLMProvider, string>> = {
+  claude_cli: 'settings.llmConfiguration.claudeCliName',
+  chatgpt: 'settings.llmConfiguration.chatgptName',
+  agent: 'settings.llmConfiguration.agentName',
+};
+/** Claude Code's model aliases; `claude_cli` (the stored default) keeps Claude Code's own model. */
+const CLAUDE_CLI_ALIASES = [
+  { id: 'fable', label: 'Fable' },
+  { id: 'opus', label: 'Opus' },
+  { id: 'sonnet', label: 'Sonnet' },
+  { id: 'haiku', label: 'Haiku' },
+];
+/** A full model name the backend forwards to the CLI, e.g. one set as LLM_MODEL in .env. */
+const CLAUDE_FULL_MODEL_NAME = /^claude-[a-z0-9][a-z0-9.-]*$/;
+/** The ChatGPT plan shares OpenAI's mark. */
+const brandMark = (p: LLMProvider): string => (p === 'chatgpt' ? 'openai' : p);
+
+/**
+ * The outcome the backend appends (`?chatgpt=`) when it sends the browser back
+ * from OpenAI. Removed from the address bar so a reload does not repeat it.
+ */
+function takeChatGptReturn(): ChatGptReturnOutcome | null {
+  const url = new URL(window.location.href);
+  const value = url.searchParams.get('chatgpt');
+  if (value === null) return null;
+  url.searchParams.delete('chatgpt');
+  window.history.replaceState(window.history.state, '', url.toString());
+  return CHATGPT_RETURN_OUTCOMES.find((outcome) => outcome === value) ?? 'error';
+}
+
+const unwrapCodeBlock = (value?: string | null): string | null => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const fenced = trimmed.match(/^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```\s*$/);
+  if (fenced) {
+    return fenced[1]?.trimEnd() || null;
+  }
+  return trimmed;
+};
+
+const getHealthCheckMessage = (
+  t: (key: string, params?: Record<string, string | number>) => string,
+  baseKey: string,
+  code?: string,
+  fallback?: string
+): string | null => {
+  if (code) {
+    const key = `${baseKey}.${code}`;
+    const localized = t(key);
+    return localized !== key ? localized : (fallback ?? code);
+  }
+  return fallback ?? null;
+};
+
+export default function SettingsPage() {
+  const [status, setStatus] = useState<Status>('loading');
+  const [error, setError] = useState<string | null>(null);
+
+  // LLM Config state
+  const [provider, setProvider] = useState<LLMProvider>('openai');
+  const [model, setModel] = useState('');
+  // The model as last loaded from the backend; keeps a saved full Claude model
+  // name in the picker after another option is chosen.
+  const [savedModel, setSavedModel] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [apiBase, setApiBase] = useState('');
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(false);
+  // Per-provider encrypted key store status (drives the saved/empty hints and
+  // the provider key list). Keyed by key-store provider name.
+  const [apiKeyStatuses, setApiKeyStatuses] = useState<ApiKeyProviderStatus[]>([]);
+  // 'auto' is the UI sentinel for "do not send reasoning_effort". Maps to
+  // empty string when persisted to the backend (so gpt-5 auto-migration
+  // won't re-fire on next load). Typed tightly so invalid values can't leak
+  // through the save path.
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | 'auto'>('auto');
+  // Read once per mount (refs survive Strict Mode's effect replay).
+  const chatGptReturnRef = useRef<ChatGptReturnOutcome | null | undefined>(undefined);
+  const [chatGptReturn, setChatGptReturn] = useState<ChatGptReturnOutcome | null>(null);
+  // `null` until the sign-in panel has checked: Save stays off until the account is connected.
+  const [chatGptConnected, setChatGptConnected] = useState<boolean | null>(null);
+  const readChatGptReturn = useCallback((): ChatGptReturnOutcome | null => {
+    if (chatGptReturnRef.current === undefined) chatGptReturnRef.current = takeChatGptReturn();
+    return chatGptReturnRef.current;
+  }, []);
+
+  // Use cached system status (loaded on app start, refreshes every 30 min)
+  const {
+    status: systemStatus,
+    isLoading: statusLoading,
+    lastFetched,
+    refreshStatus,
+  } = useStatusCache();
+
+  // Health check result from manual test
+  const [healthCheck, setHealthCheck] = useState<LLMHealthCheck | null>(null);
+
+  // Feature config state
+  const [enableCoverLetter, setEnableCoverLetter] = useState(false);
+  const [enableOutreach, setEnableOutreach] = useState(false);
+  const [enableInterviewPrep, setEnableInterviewPrep] = useState(false);
+  const [featureConfigLoading, setFeatureConfigLoading] = useState(false);
+  const [promptConfigLoading, setPromptConfigLoading] = useState(false);
+  const [promptOptions, setPromptOptions] = useState<PromptOption[]>([]);
+  const [defaultPromptId, setDefaultPromptId] = useState('keywords');
+
+  // Custom feature prompts (cover letter, cold outreach). Empty string
+  // means "use default"; the backend's *_default fields give us the
+  // actual default text for placeholder display.
+  const [coverLetterPrompt, setCoverLetterPrompt] = useState('');
+  const [outreachPrompt, setOutreachPrompt] = useState('');
+  const [coverLetterDefault, setCoverLetterDefault] = useState('');
+  const [outreachDefault, setOutreachDefault] = useState('');
+  const [featurePromptSaving, setFeaturePromptSaving] = useState<string | null>(null);
+  const [featurePromptError, setFeaturePromptError] = useState<{
+    field: string;
+    missing: string[];
+  } | null>(null);
+
+  // Subscription provider awaiting the risk confirmation (null = dialog closed).
+  const [riskProvider, setRiskProvider] = useState<SubscriptionProvider | null>(null);
+
+  // Per-provider key deletion confirm target (null = dialog closed).
+  const [keyToDelete, setKeyToDelete] = useState<ApiKeyProvider | null>(null);
+
+  // Danger Zone state
+  const [showClearApiKeysDialog, setShowClearApiKeysDialog] = useState(false);
+  const [showResetDatabaseDialog, setShowResetDatabaseDialog] = useState(false);
+  const [showSuccessDialog, setShowSuccessDialog] = useState(false);
+  const [successMessage, setSuccessDialogMessage] = useState({ title: '', description: '' });
+  const [isResetting, setIsResetting] = useState(false);
+
+  // Language settings
+  const {
+    contentLanguage,
+    uiLanguage,
+    setContentLanguage,
+    setUiLanguage,
+    languageNames,
+    supportedLanguages,
+    isLoading: languageLoading,
+  } = useLanguage();
+
+  // Display settings (client-only, like the UI language)
+  const effectsEnabled = useEffectsEnabled();
+  const setEffectsEnabled = useSetEffectsEnabled();
+
+  // Translations
+  const { t } = useTranslations();
+  const providerInfo = PROVIDER_INFO[provider] ?? PROVIDER_INFO['openai'];
+  const fallbackPromptOptions = useMemo<PromptOption[]>(
+    () => [
+      {
+        id: 'nudge',
+        label: t('tailor.promptOptions.nudge.label'),
+        description: t('tailor.promptOptions.nudge.description'),
+      },
+      {
+        id: 'keywords',
+        label: t('tailor.promptOptions.keywords.label'),
+        description: t('tailor.promptOptions.keywords.description'),
+      },
+      {
+        id: 'full',
+        label: t('tailor.promptOptions.full.label'),
+        description: t('tailor.promptOptions.full.description'),
+      },
+    ],
+    [t]
+  );
+  const promptOptionOverrides = useMemo<Record<string, { label: string; description: string }>>(
+    () => ({
+      nudge: {
+        label: t('tailor.promptOptions.nudge.label'),
+        description: t('tailor.promptOptions.nudge.description'),
+      },
+      keywords: {
+        label: t('tailor.promptOptions.keywords.label'),
+        description: t('tailor.promptOptions.keywords.description'),
+      },
+      full: {
+        label: t('tailor.promptOptions.full.label'),
+        description: t('tailor.promptOptions.full.description'),
+      },
+    }),
+    [t]
+  );
+  const localizedPromptOptions = useMemo(() => {
+    const options = promptOptions.length ? promptOptions : fallbackPromptOptions;
+    return options.map((option) => {
+      const override = promptOptionOverrides[option.id];
+      return override ? { ...option, ...override } : option;
+    });
+  }, [promptOptions, fallbackPromptOptions, promptOptionOverrides]);
+  const healthDetailItems = useMemo(() => {
+    if (!healthCheck) return [];
+
+    return [
+      {
+        key: 'testPrompt',
+        label: t('settings.llmConfiguration.testPromptLabel'),
+        value: unwrapCodeBlock(healthCheck.test_prompt),
+      },
+      {
+        key: 'modelOutput',
+        label: t('settings.llmConfiguration.modelOutputLabel'),
+        value: unwrapCodeBlock(healthCheck.model_output),
+      },
+      {
+        key: 'reasoningContent',
+        label: t('settings.llmConfiguration.reasoningContentLabel'),
+        value: unwrapCodeBlock(healthCheck.reasoning_content),
+      },
+      {
+        key: 'errorDetail',
+        label: t('settings.llmConfiguration.errorDetailLabel'),
+        value: unwrapCodeBlock(healthCheck.error_detail),
+      },
+    ].filter((item) => item.value);
+  }, [healthCheck, t]);
+  const healthCheckError = useMemo(() => {
+    if (!healthCheck) return null;
+    return getHealthCheckMessage(
+      t,
+      'settings.llmConfiguration.healthErrors',
+      healthCheck.error_code,
+      healthCheck.error
+    );
+  }, [healthCheck, t]);
+  const healthCheckWarning = useMemo(() => {
+    if (!healthCheck) return null;
+    return getHealthCheckMessage(
+      t,
+      'settings.llmConfiguration.healthWarnings',
+      healthCheck.warning_code,
+      healthCheck.warning
+    );
+  }, [healthCheck, t]);
+
+  // Load LLM config and feature config on mount
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadConfig() {
+      const returnedFromChatGpt = readChatGptReturn();
+      if (returnedFromChatGpt) setChatGptReturn(returnedFromChatGpt);
+      try {
+        const [llmConfig, featureConfig, promptConfig, featurePrompts, keyStatus] =
+          await Promise.all([
+            fetchLlmConfig().catch(() => null),
+            fetchFeatureConfig().catch(() => null),
+            fetchPromptConfig().catch(() => null),
+            fetchFeaturePrompts().catch(() => null),
+            fetchApiKeyStatus().catch(() => null),
+          ]);
+
+        if (cancelled) return;
+
+        const statuses = keyStatus?.providers ?? [];
+        setApiKeyStatuses(statuses);
+
+        if (llmConfig) {
+          const providerFromBackend = llmConfig.provider || 'openai';
+          const safeProvider = PROVIDERS.includes(providerFromBackend as LLMProvider)
+            ? (providerFromBackend as LLMProvider)
+            : 'openai';
+          // Back from Sign in with ChatGPT: show the ChatGPT plan panel (unsaved)
+          // even if another provider is still the saved one.
+          const resumeChatGpt = returnedFromChatGpt !== null && safeProvider !== 'chatgpt';
+          const activeProvider: LLMProvider = resumeChatGpt ? 'chatgpt' : safeProvider;
+          setProvider(activeProvider);
+          setModel(
+            resumeChatGpt
+              ? PROVIDER_INFO.chatgpt.defaultModel
+              : llmConfig.model || PROVIDER_INFO[safeProvider].defaultModel
+          );
+          setSavedModel(llmConfig.model || '');
+          // Whether THIS provider already has an encrypted key (per-provider,
+          // not the legacy shared slot) drives the "leave blank to keep" hint.
+          const keyProvider = llmProviderToKeyProvider(activeProvider);
+          setHasStoredApiKey(statuses.some((s) => s.provider === keyProvider && s.configured));
+          setApiKey('');
+          setApiBase(resumeChatGpt ? '' : llmConfig.api_base || '');
+          setReasoningEffort((llmConfig.reasoning_effort as ReasoningEffort | null) ?? 'auto');
+
+          if (providerFromBackend !== safeProvider) {
+            setError(t('settings.errors.unknownProvider', { provider: providerFromBackend }));
+          }
+        }
+
+        if (featureConfig) {
+          setEnableCoverLetter(featureConfig.enable_cover_letter);
+          setEnableOutreach(featureConfig.enable_outreach_message);
+          setEnableInterviewPrep(featureConfig.enable_interview_prep);
+        }
+
+        if (promptConfig) {
+          setPromptOptions(promptConfig.prompt_options || []);
+          setDefaultPromptId(promptConfig.default_prompt_id || 'keywords');
+        }
+
+        if (featurePrompts) {
+          setCoverLetterPrompt(featurePrompts.cover_letter_prompt);
+          setOutreachPrompt(featurePrompts.outreach_message_prompt);
+          setCoverLetterDefault(featurePrompts.cover_letter_default);
+          setOutreachDefault(featurePrompts.outreach_message_default);
+        }
+
+        setStatus('idle');
+      } catch (err) {
+        console.error('Failed to load settings', err);
+        if (!cancelled) {
+          setError(t('settings.errors.unableToConnectBackend'));
+          setStatus('error');
+        }
+      }
+    }
+
+    loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [t, readChatGptReturn]);
+
+  // Whether a given key-store provider currently has a saved key.
+  const providerHasStoredKey = (p: LLMProvider): boolean => {
+    const keyProvider = llmProviderToKeyProvider(p);
+    return apiKeyStatuses.some((s) => s.provider === keyProvider && s.configured);
+  };
+
+  // Re-fetch the per-provider key status (after save/delete/clear).
+  const refreshApiKeyStatus = async (): Promise<ApiKeyProviderStatus[]> => {
+    const status = await fetchApiKeyStatus().catch(() => null);
+    const statuses = status?.providers ?? [];
+    setApiKeyStatuses(statuses);
+    return statuses;
+  };
+
+  // Delete one provider's saved key (per-row action).
+  const handleDeleteApiKey = async (keyProvider: ApiKeyProvider) => {
+    try {
+      await deleteApiKey(keyProvider);
+      const statuses = await refreshApiKeyStatus();
+      if (llmProviderToKeyProvider(provider) === keyProvider) {
+        setHasStoredApiKey(false);
+      }
+      // Keep the local hint in sync even if the active provider differs.
+      void statuses;
+    } catch (err) {
+      console.error('Failed to delete API key', err);
+      setError((err as Error).message || t('settings.errors.unableToSaveConfiguration'));
+    } finally {
+      setKeyToDelete(null);
+    }
+  };
+
+  // Handle provider change. Switching to a subscription provider waits for the
+  // user to accept the risk in SubscriptionRiskDialog.
+  const handleProviderChange = (newProvider: LLMProvider) => {
+    if ((newProvider === 'claude_cli' || newProvider === 'chatgpt') && newProvider !== provider) {
+      setRiskProvider(newProvider);
+      return;
+    }
+    switchProvider(newProvider);
+  };
+
+  const switchProvider = (newProvider: LLMProvider) => {
+    const nextInfo = PROVIDER_INFO[newProvider];
+    setProvider(newProvider);
+    setModel(nextInfo.defaultModel);
+
+    // H-09: the Base URL field is shared across providers, so an endpoint left
+    // over from the previous one used to be persisted against the next —
+    // e.g. Azure -> Anthropic routed every Claude call at the Azure host.
+    //
+    // Reset on EVERY actual switch and seed only the destination's own default.
+    // Keying off the previous provider's flags was not enough: a base URL typed
+    // manually under a provider that declares neither (openai, anthropic, ...)
+    // survived the switch and was saved as Azure's required endpoint.
+    if (newProvider !== provider) {
+      setApiBase(nextInfo.defaultBaseUrl ?? '');
+    } else if (nextInfo.defaultBaseUrl && !apiBase.trim()) {
+      setApiBase(nextInfo.defaultBaseUrl);
+    }
+
+    // Clear the key input on switch, but drive the "has stored key" hint from
+    // the per-provider store so a saved key for the new provider is recognized
+    // (each provider keeps its own key — switching no longer wipes anything).
+    setApiKey('');
+    setHasStoredApiKey(providerHasStoredKey(newProvider));
+  };
+
+  // Save configuration
+  const handleSave = async () => {
+    setStatus('saving');
+    setError(null);
+    setHealthCheck(null);
+
+    try {
+      if (requiresApiKey && !apiKey.trim() && !hasStoredApiKey) {
+        setError(t('settings.errors.apiKeyRequired'));
+        setStatus('error');
+        return;
+      }
+      if (requiresApiBase && !apiBase.trim()) {
+        setError(t('settings.errors.baseUrlRequired', { provider: providerInfo.name }));
+        setStatus('error');
+        return;
+      }
+
+      const trimmedKey = apiKey.trim();
+
+      // (1) Persist the key to the encrypted PER-PROVIDER store (only when the
+      // user typed a new one). This is the bug fix: keys no longer ride on the
+      // shared config slot, so saving one provider never wipes another's key.
+      if (trimmedKey) {
+        const keyProvider = llmProviderToKeyProvider(provider);
+        await updateApiKeys({ [keyProvider]: trimmedKey } as Record<ApiKeyProvider, string>);
+      }
+
+      // (2) Persist non-secret LLM config — WITHOUT api_key.
+      const update: LLMConfigUpdate = {
+        provider,
+        model: model.trim(),
+        api_base: apiBase.trim() || null,
+        // Map UI sentinel 'auto' → '' so the server persists an empty string
+        // and the gpt-5 auto-migration won't re-fire.
+        reasoning_effort: reasoningEffort === 'auto' ? '' : (reasoningEffort as ReasoningEffort),
+      };
+      // Not persisted: proves the key may follow a changed Base URL.
+      if (trimmedKey) {
+        update.api_key = trimmedKey;
+      }
+      await updateLlmConfig(update);
+
+      // Refresh the per-provider key status + cached system status after save.
+      const statuses = await refreshApiKeyStatus();
+      setApiKey('');
+      setHasStoredApiKey(
+        statuses.some((s) => s.provider === llmProviderToKeyProvider(provider) && s.configured)
+      );
+      await refreshStatus();
+
+      setStatus('saved');
+      setTimeout(() => setStatus('idle'), 2000);
+    } catch (err) {
+      console.error('Failed to save config', err);
+      if (err instanceof LlmConfigError && err.code === API_KEY_REQUIRED_FOR_ENDPOINT) {
+        setError(t('settings.errors.apiKeyRequiredForEndpoint'));
+      } else {
+        setError((err as Error).message || t('settings.errors.unableToSaveConfiguration'));
+      }
+      setStatus('error');
+    }
+  };
+
+  // Test connection with current form values (pre-save testing)
+  const handleTestConnection = async () => {
+    setStatus('testing');
+    setError(null);
+    setHealthCheck(null);
+
+    try {
+      if (requiresApiBase && !apiBase.trim()) {
+        setHealthCheck({
+          healthy: false,
+          provider,
+          model,
+          error: t('settings.errors.baseUrlRequired', { provider: providerInfo.name }),
+        });
+        setStatus('idle');
+        return;
+      }
+
+      // Build config from current form values
+      const testConfig: LLMConfigUpdate = {
+        provider,
+        model: model.trim() || providerInfo.defaultModel,
+        api_base: apiBase.trim() || null,
+        reasoning_effort: reasoningEffort === 'auto' ? '' : (reasoningEffort as ReasoningEffort),
+      };
+
+      // Send the user-typed key if present (for any provider, required or
+      // optional). If blank, omit the field so the backend falls back to
+      // the stored key for that provider.
+      if (apiKey.trim()) {
+        testConfig.api_key = apiKey.trim();
+      }
+
+      const result = await testLlmConnection(testConfig);
+      setHealthCheck(result);
+      setStatus('idle');
+    } catch (err) {
+      console.error('Failed to test connection', err);
+      setHealthCheck({ healthy: false, provider, model, error: (err as Error).message });
+      setStatus('idle');
+    }
+  };
+
+  // Update feature config
+  const handleFeatureConfigChange = async (
+    key: 'enable_cover_letter' | 'enable_outreach_message' | 'enable_interview_prep',
+    value: boolean
+  ) => {
+    setFeatureConfigLoading(true);
+    try {
+      const updated = await updateFeatureConfig({ [key]: value });
+      setEnableCoverLetter(updated.enable_cover_letter);
+      setEnableOutreach(updated.enable_outreach_message);
+      setEnableInterviewPrep(updated.enable_interview_prep);
+    } catch (err) {
+      console.error('Failed to update feature config', err);
+      // Revert on error
+      if (key === 'enable_cover_letter') {
+        setEnableCoverLetter(!value);
+      } else if (key === 'enable_outreach_message') {
+        setEnableOutreach(!value);
+      } else {
+        setEnableInterviewPrep(!value);
+      }
+    } finally {
+      setFeatureConfigLoading(false);
+    }
+  };
+
+  const handleFeaturePromptSave = async (
+    field: 'cover_letter_prompt' | 'outreach_message_prompt',
+    value: string
+  ) => {
+    setFeaturePromptSaving(field);
+    // Only clear the error for the field being saved; keep errors on the
+    // other field visible until the user addresses them.
+    setFeaturePromptError((prev) => (prev?.field === field ? null : prev));
+    try {
+      const update: FeaturePromptsUpdate = { [field]: value };
+      const fresh = await updateFeaturePrompts(update);
+      setCoverLetterPrompt(fresh.cover_letter_prompt);
+      setOutreachPrompt(fresh.outreach_message_prompt);
+    } catch (err) {
+      if (err instanceof FeaturePromptsError) {
+        setFeaturePromptError({ field: err.detail.field, missing: err.detail.missing });
+      } else {
+        setError((err as Error).message);
+      }
+    } finally {
+      setFeaturePromptSaving(null);
+    }
+  };
+
+  const handlePromptConfigChange = async (value: string) => {
+    setPromptConfigLoading(true);
+    setError(null);
+    try {
+      const updated = await updatePromptConfig({ default_prompt_id: value });
+      setDefaultPromptId(updated.default_prompt_id);
+      if (updated.prompt_options?.length) {
+        setPromptOptions(updated.prompt_options);
+      }
+    } catch (err) {
+      console.error('Failed to update prompt config', err);
+      setError((err as Error).message || t('settings.errors.unableToSaveConfiguration'));
+    } finally {
+      setPromptConfigLoading(false);
+    }
+  };
+
+  // Handle Clear API Keys
+  const handleClearApiKeys = async () => {
+    setIsResetting(true);
+    try {
+      await clearAllApiKeys();
+
+      // The encrypted store is now empty for every provider.
+      await refreshApiKeyStatus();
+      // Refetch full LLM config to ensure local state is synced with backend
+      const llmConfig = await fetchLlmConfig().catch(() => null);
+      if (llmConfig) {
+        setProvider(llmConfig.provider || 'openai');
+        setModel(llmConfig.model || PROVIDER_INFO['openai'].defaultModel);
+        setSavedModel(llmConfig.model || '');
+        setApiBase(llmConfig.api_base || '');
+        setReasoningEffort(llmConfig.reasoning_effort ?? 'auto');
+      }
+      setApiKey('');
+      setHasStoredApiKey(false);
+
+      setHealthCheck(null);
+      // Refresh status
+      await refreshStatus();
+      setError(null);
+      setSuccessDialogMessage({
+        title: t('common.success'),
+        description: t('common.keysCleared'),
+      });
+      setShowSuccessDialog(true);
+    } catch (err) {
+      console.error('Failed to clear API keys', err);
+      setError(t('settings.errors.failedToClearApiKeys'));
+    } finally {
+      setIsResetting(false);
+      setShowClearApiKeysDialog(false);
+    }
+  };
+
+  // Handle Reset Database
+  const handleResetDatabase = async () => {
+    setIsResetting(true);
+    try {
+      await resetDatabase();
+
+      // Clear all related localStorage keys. Routed through safeStorage so a
+      // context where storage throws (enterprise policy, iframe) cannot abort
+      // the reset flow *after* the server-side wipe has already succeeded.
+      safeStorage.remove('master_resume_id');
+      safeStorage.remove('resume_builder_draft');
+      try {
+        Object.keys(localStorage)
+          .filter(
+            (key) =>
+              key.startsWith(RESUME_DRAFT_STORAGE_PREFIX) ||
+              key.startsWith(ATTACHMENT_DRAFT_STORAGE_PREFIX)
+          )
+          .forEach((key) => safeStorage.remove(key));
+      } catch {
+        // Enumerating localStorage can throw for the same reasons; the scoped
+        // drafts simply stay until their TTL expires.
+      }
+      safeStorage.remove('resume_builder_settings');
+      safeStorage.remove('resume_matcher_content_language');
+      safeStorage.remove('resume_matcher_ui_language');
+
+      // Refresh status to show empty counts
+      await refreshStatus();
+      // Clear health check as context is lost
+      setHealthCheck(null);
+      setError(null);
+      setSuccessDialogMessage({
+        title: t('common.success'),
+        description: t('common.databaseReset'),
+      });
+      setShowSuccessDialog(true);
+    } catch (err) {
+      console.error('Failed to reset database', err);
+      setError(t('settings.errors.failedToResetDatabase'));
+    } finally {
+      setIsResetting(false);
+      setShowResetDatabaseDialog(false);
+    }
+  };
+
+  // Format last fetched time for display
+  const formatLastFetched = () => {
+    if (!lastFetched) return t('settings.systemStatus.lastFetched.never');
+    // oxlint-disable-next-line react/purity -- relative "last fetched" label must read the clock
+    const now = new Date();
+    const diff = Math.floor((now.getTime() - lastFetched.getTime()) / 1000);
+    if (diff < 60) return t('settings.systemStatus.lastFetched.justNow');
+    if (diff < 3600)
+      return t('settings.systemStatus.lastFetched.minutesAgo', { minutes: Math.floor(diff / 60) });
+    return t('settings.systemStatus.lastFetched.hoursAgo', { hours: Math.floor(diff / 3600) });
+  };
+
+  const requiresApiKey = providerInfo.requiresKey ?? true;
+  const requiresApiBase = providerInfo.requiresBaseUrl ?? false;
+  const usesLocalCli = providerInfo.localCli ?? false;
+  const usesChatGptSignIn = providerInfo.chatgptSignIn ?? false;
+  const usesAgent = providerInfo.agentMode ?? false;
+  // Matched as the backend does (cli_model_arg trims and lowercases).
+  const cliModel = model.trim().toLowerCase();
+  const savedCliModel = savedModel.trim().toLowerCase();
+  const claudeCliModelOptions = [
+    {
+      id: PROVIDER_INFO.claude_cli.defaultModel,
+      label: t('settings.llmConfiguration.claudeCliDefaultModel'),
+    },
+    ...CLAUDE_CLI_ALIASES,
+    ...(CLAUDE_FULL_MODEL_NAME.test(savedCliModel)
+      ? [{ id: savedCliModel, label: savedCliModel }]
+      : []),
+  ];
+  // Anything else (e.g. a stale LLM_MODEL) runs on Claude Code's default, so show that.
+  const claudeCliModel = claudeCliModelOptions.some((option) => option.id === cliModel)
+    ? cliModel
+    : PROVIDER_INFO.claude_cli.defaultModel;
+  // Saving would activate a provider whose every call fails until the user signs in.
+  const chatGptSaveBlocked = usesChatGptSignIn && chatGptConnected !== true;
+  const fullNameKey = FULL_NAME_KEYS[provider];
+  // M-04: provider-specific base-URL copy comes from the message catalogs, not
+  // English literals in PROVIDER_INFO — otherwise this whole block reverted to
+  // English inside an otherwise fully-translated settings page.
+  const baseUrlKey = providerInfo.baseUrlI18nKey;
+  const baseUrlLabel = baseUrlKey
+    ? t(`settings.llmConfiguration.${baseUrlKey}BaseUrlLabel`)
+    : t('settings.llmConfiguration.baseUrlLabel');
+  const baseUrlPlaceholder =
+    providerInfo.baseUrlPlaceholder ?? t('settings.llmConfiguration.baseUrlPlaceholder');
+  const baseUrlDescription = baseUrlKey
+    ? t(`settings.llmConfiguration.${baseUrlKey}BaseUrlDescription`)
+    : t('settings.llmConfiguration.baseUrlDescription');
+  // The Save label swaps only between these three states; keying the swap on
+  // `status` itself would crossfade an unchanged label on loading/testing.
+  const saveState = status === 'saving' ? 'saving' : status === 'saved' ? 'saved' : 'idle';
+
+  return (
+    <>
+      <PageFrame width="narrow">
+        <PageHeader>
+          <PageHeader.Back href="/dashboard">{t('common.back')}</PageHeader.Back>
+          <PageHeader.Title>{t('settings.title')}</PageHeader.Title>
+          <PageHeader.Subtitle>{t('settings.subtitle')}</PageHeader.Subtitle>
+        </PageHeader>
+
+        <div className="px-8 py-8 md:px-12 space-y-8">
+          <SettingsSupportStrip />
+
+          {/* API Key Not Configured Warning */}
+          {!statusLoading && systemStatus && !systemStatus.llm_configured && (
+            <Alert tone="warning">
+              <StatusIndicator tone="warning" live={false}>
+                {t('settings.setupRequired.title')}
+              </StatusIndicator>
+              <p className="mt-2">{t('settings.setupRequired.description')}</p>
+            </Alert>
+          )}
+
+          {/* System Status Panel */}
+          <section className="space-y-4">
+            <div className="flex items-center justify-between border-b border-panel-hover pb-2">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Pulse className="w-4 h-4" />
+                  <h2 className="font-serif text-xl font-bold text-ink text-balance">
+                    {t('settings.systemStatus.title')}
+                  </h2>
+                </div>
+                {lastFetched && (
+                  <span className="font-mono text-xs text-steel flex items-center gap-1">
+                    <Clock className="size-4" />
+                    {formatLastFetched()}
+                  </span>
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={refreshStatus}
+                disabled={statusLoading}
+                className="gap-1 text-xs"
+              >
+                <ArrowsClockwise className={statusLoading ? 'animate-spin' : undefined} />
+                {t('settings.systemStatus.refresh')}
+              </Button>
+            </div>
+
+            {statusLoading ? (
+              <div className="flex items-center justify-center p-8">
+                <SpinnerGap className="w-6 h-6 animate-spin text-steel" />
+              </div>
+            ) : !systemStatus ? (
+              <Alert tone="error" title={t('settings.systemStatus.unableToConnect')}>
+                <p>{t('settings.systemStatus.expectedAt', { apiUrl: API_URL })}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={refreshStatus}
+                  className="mt-3"
+                >
+                  <ArrowsClockwise aria-hidden="true" />
+                  {t('common.retry')}
+                </Button>
+              </Alert>
+            ) : (
+              // @container so the status cards adapt to the section width
+              // rather than the viewport — useful when the settings page is
+              // shown alongside a sidebar or in a split view.
+              <div className="@container">
+                <div className="grid grid-cols-2 @3xl:grid-cols-4 gap-4">
+                  {/* LLM Status */}
+                  <div className="border border-ink bg-white p-4 shadow-sw-nested">
+                    <div className="flex items-center gap-2 mb-2">
+                      <HardDrives className="w-4 h-4 text-steel" />
+                      <span className="font-mono text-xs uppercase text-steel">
+                        {t('settings.statusCards.llm')}
+                      </span>
+                    </div>
+                    <StatusIndicator tone={systemStatus.llm_healthy ? 'ready' : 'error'}>
+                      {systemStatus.llm_healthy
+                        ? t('settings.statusValues.healthy')
+                        : t('settings.statusValues.offline')}
+                    </StatusIndicator>
+                  </div>
+
+                  {/* Database Status */}
+                  <div className="border border-ink bg-white p-4 shadow-sw-nested">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Database className="w-4 h-4 text-steel" />
+                      <span className="font-mono text-xs uppercase text-steel">
+                        {t('settings.statusCards.database')}
+                      </span>
+                    </div>
+                    <StatusIndicator tone="ready">
+                      {t('settings.statusValues.connected')}
+                    </StatusIndicator>
+                  </div>
+
+                  {/* Resumes Count */}
+                  <div className="border border-ink bg-white p-4 shadow-sw-nested">
+                    <div className="flex items-center gap-2 mb-2">
+                      <FileText className="w-4 h-4 text-steel" />
+                      <span className="font-mono text-xs uppercase text-steel">
+                        {t('settings.statusCards.resumes')}
+                      </span>
+                    </div>
+                    <span className="font-mono text-2xl font-bold tabular-nums">
+                      {systemStatus.database_stats.total_resumes}
+                    </span>
+                  </div>
+
+                  {/* Jobs Count */}
+                  <div className="border border-ink bg-white p-4 shadow-sw-nested">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Briefcase className="w-4 h-4 text-steel" />
+                      <span className="font-mono text-xs uppercase text-steel">
+                        {t('settings.statusCards.jobs')}
+                      </span>
+                    </div>
+                    <span className="font-mono text-2xl font-bold tabular-nums">
+                      {systemStatus.database_stats.total_jobs}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Additional Stats Row */}
+            {systemStatus && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="border border-ink bg-white p-4 shadow-sw-nested">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="font-mono text-xs uppercase text-steel">
+                      {t('settings.statusCards.improvements')}
+                    </span>
+                  </div>
+                  <span className="font-mono text-2xl font-bold tabular-nums">
+                    {systemStatus.database_stats.total_improvements}
+                  </span>
+                </div>
+                <div className="border border-ink bg-white p-4 shadow-sw-nested">
+                  <div className="flex items-center gap-2 mb-2">
+                    <FileText className="w-4 h-4 text-steel" />
+                    <span className="font-mono text-xs uppercase text-steel">
+                      {t('settings.statusCards.masterResume')}
+                    </span>
+                  </div>
+                  {systemStatus.has_master_resume ? (
+                    <StatusIndicator tone="ready">
+                      {t('settings.statusValues.configured')}
+                    </StatusIndicator>
+                  ) : (
+                    <StatusIndicator tone="warning">
+                      {t('settings.statusValues.notSet')}
+                    </StatusIndicator>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* LLM Configuration */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-panel-hover pb-2">
+              <Key className="w-4 h-4" />
+              <h2 className="font-serif text-xl font-bold text-ink text-balance">
+                {t('settings.llmConfigurationTitle')}
+              </h2>
+            </div>
+
+            <div className="grid gap-6">
+              {/* Provider Selection */}
+              <div className="space-y-2">
+                <Label id="provider-label">{t('settings.providerLabel')}</Label>
+                <SegmentedControl
+                  aria-labelledby="provider-label"
+                  size="sm"
+                  className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6"
+                  items={PROVIDERS.map((p) => {
+                    const mark = brandMark(p);
+                    const shortNameKey = SHORT_NAME_KEYS[p];
+                    return {
+                      value: p,
+                      label: (
+                        <span className="inline-flex items-center gap-2">
+                          {hasBrandIcon(mark) && (
+                            <BrandIcon name={mark} className="size-4 shrink-0" />
+                          )}
+                          {shortNameKey ? t(shortNameKey) : PROVIDER_INFO[p].name.split(' ')[0]}
+                        </span>
+                      ),
+                    };
+                  })}
+                  value={provider}
+                  onChange={handleProviderChange}
+                />
+                <p className="text-xs text-steel font-mono">
+                  {t('settings.llmConfiguration.selectedProvider', {
+                    provider: fullNameKey ? t(fullNameKey) : providerInfo.name,
+                  })}
+                </p>
+              </div>
+
+              {usesAgent ? (
+                <Alert tone="info" title={t('settings.llmConfiguration.agentNoteTitle')}>
+                  <p>{t('settings.llmConfiguration.agentNote')}</p>
+                  <a
+                    href={AGENT_SETUP_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-2 inline-flex items-center gap-1 font-mono text-xs uppercase tracking-wider text-primary underline-offset-4 hover:underline"
+                  >
+                    {t('settings.llmConfiguration.agentGuideLink')}
+                    <ArrowSquareOut aria-hidden="true" className="size-3" />
+                  </a>
+                </Alert>
+              ) : usesLocalCli ? (
+                <>
+                  <Alert tone="info">{t('settings.llmConfiguration.claudeCliNote')}</Alert>
+                  <div className="space-y-2">
+                    <Dropdown
+                      label={t('settings.llmConfiguration.modelLabel')}
+                      value={claudeCliModel}
+                      onChange={setModel}
+                      options={claudeCliModelOptions}
+                    />
+                    <p className="text-xs text-steel font-mono">
+                      {t('settings.llmConfiguration.claudeCliModelHint')}
+                    </p>
+                  </div>
+                  <Alert
+                    tone="warning"
+                    title={t('settings.llmConfiguration.claudeCliWarningTitle')}
+                  >
+                    <p>{t('settings.llmConfiguration.claudeCliWarning')}</p>
+                    <p className="mt-2">{t('settings.llmConfiguration.communityBuilt')}</p>
+                  </Alert>
+                </>
+              ) : usesChatGptSignIn ? (
+                <>
+                  <ChatGptConnection
+                    model={model}
+                    onModelChange={setModel}
+                    returnOutcome={chatGptReturn}
+                    onConnectionChange={refreshStatus}
+                    onStatusChange={setChatGptConnected}
+                  />
+                  <Alert tone="warning" title={t('settings.llmConfiguration.chatgptWarningTitle')}>
+                    <p>{t('settings.llmConfiguration.chatgptWarning')}</p>
+                    <p className="mt-2">{t('settings.llmConfiguration.communityBuilt')}</p>
+                  </Alert>
+                </>
+              ) : (
+                <>
+                  {/* Model Input */}
+                  <div className="space-y-2">
+                    <Label htmlFor="model">{t('settings.llmConfiguration.modelLabel')}</Label>
+                    <Input
+                      id="model"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder={providerInfo.defaultModel}
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="font-mono"
+                    />
+                    <p className="text-xs text-steel font-mono">
+                      {t('settings.llmConfiguration.defaultModel', {
+                        model: providerInfo.defaultModel,
+                      })}
+                    </p>
+                  </div>
+
+                  {/* API Key Input — always enabled. For providers that don't
+                  require a key (Ollama, OpenAI-Compatible local servers), the
+                  field is marked optional so users can STILL enter a key if
+                  their deployment needs auth (e.g., a secured LM Studio or a
+                  hosted OpenAI-compatible proxy). Save-time validation only
+                  fails when `requiresApiKey` is true. */}
+                  <div className="space-y-2">
+                    <Label htmlFor="apiKey">
+                      {t('settings.llmConfiguration.apiKeyLabel')}{' '}
+                      {!requiresApiKey && (
+                        <span className="text-steel">
+                          {t('settings.llmConfiguration.apiKeyOptional')}
+                        </span>
+                      )}
+                    </Label>
+                    <Input
+                      id="apiKey"
+                      name="llm-api-key"
+                      type="password"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder={
+                        requiresApiKey
+                          ? t('settings.llmConfiguration.apiKeyPlaceholder')
+                          : t('settings.llmConfiguration.apiKeyOptionalPlaceholder')
+                      }
+                      className="font-mono"
+                    />
+                    {hasStoredApiKey && !apiKey && (
+                      <p className="text-xs text-steel font-mono">
+                        {t('settings.llmConfiguration.leaveBlankToKeepExistingKey')}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* Saved per-provider keys — each provider keeps its own encrypted
+                  key, so switching providers never wipes another's. */}
+              {apiKeyStatuses.some((s) => s.configured) && (
+                <div className="space-y-2 border border-ink bg-paper p-3 shadow-sw-nested">
+                  <p className="font-mono text-xs uppercase tracking-wider text-ink-soft">
+                    {t('settings.apiKeys.savedTitle')}
+                  </p>
+                  <ul className="space-y-2">
+                    {apiKeyStatuses
+                      .filter((s) => s.configured)
+                      .map((s) => (
+                        <li
+                          key={s.provider}
+                          className="flex items-center justify-between gap-2 text-sm"
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <StatusIndicator tone="ready">
+                              {API_KEY_PROVIDER_INFO[s.provider]?.name ?? s.provider}
+                            </StatusIndicator>
+                            <span className="font-mono text-xs text-steel">{s.masked_key}</span>
+                          </span>
+                          <Button
+                            type="button"
+                            variant="outline-destructive"
+                            size="sm"
+                            onClick={() => setKeyToDelete(s.provider)}
+                            aria-label={t('settings.apiKeys.deleteAria', {
+                              provider: API_KEY_PROVIDER_INFO[s.provider]?.name ?? s.provider,
+                            })}
+                          >
+                            {t('common.delete')}
+                          </Button>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              )}
+
+              {!usesLocalCli && !usesChatGptSignIn && !usesAgent && (
+                <>
+                  {/* API Base URL (optional, for proxies/aggregators/custom endpoints) */}
+                  <div className="space-y-2">
+                    <Label htmlFor="apiBase">
+                      {baseUrlLabel}{' '}
+                      {requiresApiBase && <span className="text-destructive">*</span>}
+                    </Label>
+                    <Input
+                      id="apiBase"
+                      type="url"
+                      inputMode="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      aria-required={requiresApiBase}
+                      value={apiBase}
+                      onChange={(e) => setApiBase(e.target.value)}
+                      placeholder={baseUrlPlaceholder}
+                      className="font-mono"
+                    />
+                    <p className="text-xs text-steel font-mono">{baseUrlDescription}</p>
+                  </div>
+
+                  {/* Reasoning Effort (optional, only applies to reasoning-capable models) */}
+                  <div className="space-y-2">
+                    <Dropdown
+                      label={t('settings.llmConfiguration.reasoningEffortLabel')}
+                      value={reasoningEffort}
+                      onChange={(value) => setReasoningEffort(value as ReasoningEffort | 'auto')}
+                      options={[
+                        {
+                          id: 'auto',
+                          label: t('settings.llmConfiguration.reasoningEffortAuto'),
+                          description: t('settings.llmConfiguration.reasoningEffortAutoDesc'),
+                        },
+                        {
+                          id: 'minimal',
+                          label: t('settings.llmConfiguration.reasoningEffortMinimal'),
+                        },
+                        { id: 'low', label: t('settings.llmConfiguration.reasoningEffortLow') },
+                        {
+                          id: 'medium',
+                          label: t('settings.llmConfiguration.reasoningEffortMedium'),
+                        },
+                        { id: 'high', label: t('settings.llmConfiguration.reasoningEffortHigh') },
+                      ]}
+                    />
+                    <p className="text-xs text-steel font-mono">
+                      {t('settings.llmConfiguration.reasoningEffortDescription')}
+                    </p>
+                  </div>
+                </>
+              )}
+
+              {/* Action Buttons */}
+              <div className="flex gap-4">
+                <Button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={status === 'saving' || status === 'loading' || chatGptSaveBlocked}
+                  aria-describedby={chatGptSaveBlocked ? 'chatgpt-save-hint' : undefined}
+                  className="flex-1"
+                >
+                  <AnimatePresence mode="wait" initial={false}>
+                    <m.span
+                      key={saveState}
+                      className="inline-flex items-center gap-2"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1, transition: { duration: DURATION.swap } }}
+                      exit={{ opacity: 0, transition: { duration: DURATION.swap } }}
+                    >
+                      {saveState === 'saving' ? (
+                        <>
+                          <SpinnerGap aria-hidden="true" className="animate-spin" />
+                          {t('common.saving')}
+                        </>
+                      ) : saveState === 'saved' ? (
+                        <>
+                          <Check />
+                          {t('common.saved')}
+                        </>
+                      ) : (
+                        <>
+                          <FloppyDisk />
+                          {t('common.save')}
+                        </>
+                      )}
+                    </m.span>
+                  </AnimatePresence>
+                </Button>
+                {/* Agent mode has no model of its own to test. */}
+                {!usesAgent && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleTestConnection}
+                    disabled={status === 'testing' || status === 'saving'}
+                  >
+                    {status === 'testing' ? (
+                      <>
+                        <SpinnerGap aria-hidden="true" className="animate-spin" />
+                        {t('common.checking')}
+                      </>
+                    ) : (
+                      <>
+                        <Pulse className="w-4 h-4" />
+                        {t('settings.llmConfiguration.testConnection')}
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
+
+              {usesChatGptSignIn && chatGptConnected === false && (
+                <p id="chatgpt-save-hint" className="text-xs text-steel font-mono">
+                  {t('settings.chatgpt.connectToSave')}
+                </p>
+              )}
+
+              {/* Error Message */}
+              {error && (
+                <Alert tone="error" className="break-words">
+                  {t('settings.llmConfiguration.errorPrefix', { error })}
+                </Alert>
+              )}
+
+              {/* Health Check Result */}
+              {healthCheck && (
+                <Alert tone={healthCheck.healthy ? 'success' : 'error'} className="break-words">
+                  <div className="mb-2">
+                    <StatusIndicator tone={healthCheck.healthy ? 'ready' : 'error'} live={false}>
+                      {healthCheck.healthy
+                        ? t('settings.llmConfiguration.connectionSuccessful')
+                        : t('settings.llmConfiguration.connectionFailed')}
+                    </StatusIndicator>
+                  </div>
+                  <p className="font-mono text-xs text-ink-soft">
+                    {t('settings.llmConfiguration.connectionDetails', {
+                      provider: healthCheck.provider,
+                      model: healthCheck.model,
+                    })}
+                  </p>
+                  {healthCheckError && (
+                    <p className="font-mono text-xs text-destructive mt-1 break-words">
+                      {healthCheckError}
+                    </p>
+                  )}
+                  {healthCheckWarning && (
+                    <p className="font-mono text-xs text-warning-text mt-1 break-words">
+                      {healthCheckWarning}
+                    </p>
+                  )}
+                  {healthDetailItems.length > 0 && (
+                    <div className="mt-3 space-y-3">
+                      {healthDetailItems.map((item) =>
+                        item.key === 'reasoningContent' ? (
+                          <details key={item.key} className="group">
+                            <summary className="cursor-pointer font-mono text-xs uppercase tracking-wider text-ink-soft hover:text-ink">
+                              {item.label}
+                            </summary>
+                            <pre className="mt-1 whitespace-pre-wrap break-words rounded-none border border-ink bg-white p-3 font-mono text-xs text-ink-soft shadow-sw-nested">
+                              {item.value}
+                            </pre>
+                          </details>
+                        ) : (
+                          <div key={item.key}>
+                            <p className="font-mono text-xs uppercase tracking-wider text-ink-soft">
+                              {item.label}
+                            </p>
+                            <pre className="mt-1 whitespace-pre-wrap break-words rounded-none border border-ink bg-white p-3 font-mono text-xs text-ink-soft shadow-sw-nested">
+                              {item.value}
+                            </pre>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+                </Alert>
+              )}
+            </div>
+          </section>
+
+          {/* Content Generation Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-panel-hover pb-2">
+              <SlidersHorizontal className="w-4 h-4" />
+              <h2 className="font-serif text-xl font-bold text-ink text-balance">
+                {t('settings.contentGeneration.title')}
+              </h2>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm text-ink-soft mb-4">
+                {t('settings.contentGeneration.description')}
+              </p>
+
+              <div className="space-y-3">
+                <ToggleSwitch
+                  checked={enableCoverLetter}
+                  onCheckedChange={(checked) => {
+                    setEnableCoverLetter(checked);
+                    handleFeatureConfigChange('enable_cover_letter', checked);
+                  }}
+                  label={t('settings.contentGeneration.coverLetter.label')}
+                  description={t('settings.contentGeneration.coverLetter.description')}
+                  disabled={featureConfigLoading}
+                />
+                {enableCoverLetter && (
+                  <div className="pl-6 space-y-2">
+                    <Label htmlFor="coverLetterPrompt">
+                      {t('settings.contentGeneration.customPromptLabel')}
+                    </Label>
+                    <Textarea
+                      id="coverLetterPrompt"
+                      rows={8}
+                      aria-invalid={featurePromptError?.field === 'cover_letter_prompt'}
+                      aria-describedby={
+                        featurePromptError?.field === 'cover_letter_prompt'
+                          ? 'coverLetterPrompt-error'
+                          : undefined
+                      }
+                      value={coverLetterPrompt}
+                      onChange={(e) => setCoverLetterPrompt(e.target.value)}
+                      placeholder={coverLetterDefault}
+                      className="font-mono text-xs break-words"
+                    />
+                    <p className="text-xs text-steel font-mono">
+                      {t('settings.contentGeneration.customPromptHelp')}
+                    </p>
+                    {featurePromptError?.field === 'cover_letter_prompt' && (
+                      <p
+                        id="coverLetterPrompt-error"
+                        role="alert"
+                        className="text-xs text-destructive font-mono break-words"
+                      >
+                        {t('settings.contentGeneration.customPromptErrorMissing', {
+                          missing: featurePromptError.missing.join(', '),
+                        })}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() =>
+                          handleFeaturePromptSave('cover_letter_prompt', coverLetterPrompt)
+                        }
+                        disabled={featurePromptSaving === 'cover_letter_prompt'}
+                      >
+                        {featurePromptSaving === 'cover_letter_prompt' ? (
+                          <>
+                            <SpinnerGap aria-hidden="true" className="animate-spin" />
+                            {t('common.saving')}
+                          </>
+                        ) : (
+                          t('common.save')
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => handleFeaturePromptSave('cover_letter_prompt', '')}
+                        disabled={featurePromptSaving === 'cover_letter_prompt'}
+                      >
+                        {t('settings.contentGeneration.customPromptResetButton')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <ToggleSwitch
+                  checked={enableOutreach}
+                  onCheckedChange={(checked) => {
+                    setEnableOutreach(checked);
+                    handleFeatureConfigChange('enable_outreach_message', checked);
+                  }}
+                  label={t('settings.contentGeneration.outreachMessage.label')}
+                  description={t('settings.contentGeneration.outreachMessage.description')}
+                  disabled={featureConfigLoading}
+                />
+                {enableOutreach && (
+                  <div className="pl-6 space-y-2">
+                    <Label htmlFor="outreachPrompt">
+                      {t('settings.contentGeneration.customPromptLabel')}
+                    </Label>
+                    <Textarea
+                      id="outreachPrompt"
+                      rows={8}
+                      aria-invalid={featurePromptError?.field === 'outreach_message_prompt'}
+                      aria-describedby={
+                        featurePromptError?.field === 'outreach_message_prompt'
+                          ? 'outreachPrompt-error'
+                          : undefined
+                      }
+                      value={outreachPrompt}
+                      onChange={(e) => setOutreachPrompt(e.target.value)}
+                      placeholder={outreachDefault}
+                      className="font-mono text-xs break-words"
+                    />
+                    <p className="text-xs text-steel font-mono">
+                      {t('settings.contentGeneration.customPromptHelp')}
+                    </p>
+                    {featurePromptError?.field === 'outreach_message_prompt' && (
+                      <p
+                        id="outreachPrompt-error"
+                        role="alert"
+                        className="text-xs text-destructive font-mono break-words"
+                      >
+                        {t('settings.contentGeneration.customPromptErrorMissing', {
+                          missing: featurePromptError.missing.join(', '),
+                        })}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() =>
+                          handleFeaturePromptSave('outreach_message_prompt', outreachPrompt)
+                        }
+                        disabled={featurePromptSaving === 'outreach_message_prompt'}
+                      >
+                        {featurePromptSaving === 'outreach_message_prompt' ? (
+                          <>
+                            <SpinnerGap aria-hidden="true" className="animate-spin" />
+                            {t('common.saving')}
+                          </>
+                        ) : (
+                          t('common.save')
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => handleFeaturePromptSave('outreach_message_prompt', '')}
+                        disabled={featurePromptSaving === 'outreach_message_prompt'}
+                      >
+                        {t('settings.contentGeneration.customPromptResetButton')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <ToggleSwitch
+                  checked={enableInterviewPrep}
+                  onCheckedChange={(checked) => {
+                    setEnableInterviewPrep(checked);
+                    handleFeatureConfigChange('enable_interview_prep', checked);
+                  }}
+                  label={t('settings.contentGeneration.interviewPrep.label')}
+                  description={t('settings.contentGeneration.interviewPrep.description')}
+                  disabled={featureConfigLoading}
+                />
+              </div>
+
+              <div className="pt-4 border-t border-paper">
+                <Dropdown
+                  options={localizedPromptOptions}
+                  value={defaultPromptId}
+                  onChange={handlePromptConfigChange}
+                  label={t('settings.promptSettings.title')}
+                  description={t('settings.promptSettings.description')}
+                  disabled={promptConfigLoading}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Language Settings Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-panel-hover pb-2">
+              <Globe className="w-4 h-4" />
+              <h2 className="font-serif text-xl font-bold text-ink text-balance">
+                {t('settings.languageTitle')}
+              </h2>
+            </div>
+
+            {/* UI Language */}
+            <div className="space-y-4">
+              <div>
+                <h3
+                  id="ui-language-heading"
+                  className="font-mono text-xs font-bold uppercase tracking-wider text-ink-soft mb-2"
+                >
+                  {t('settings.uiLanguage')}
+                </h3>
+                <p className="text-sm text-ink-soft mb-3">{t('settings.uiLanguageDescription')}</p>
+              </div>
+
+              <SegmentedControl
+                aria-labelledby="ui-language-heading"
+                className="grid grid-cols-2 md:grid-cols-4"
+                items={supportedLanguages.map((lang) => ({
+                  value: lang,
+                  label: languageNames[lang],
+                  disabled: languageLoading,
+                }))}
+                value={uiLanguage}
+                onChange={(lang) => setUiLanguage(lang as Locale)}
+              />
+            </div>
+
+            {/* Content Language */}
+            <div className="space-y-4 pt-4 border-t border-paper">
+              <div>
+                <h3
+                  id="content-language-heading"
+                  className="font-mono text-xs font-bold uppercase tracking-wider text-ink-soft mb-2"
+                >
+                  {t('settings.contentLanguage')}
+                </h3>
+                <p className="text-sm text-ink-soft mb-3">
+                  {t('settings.contentLanguageDescription')}
+                </p>
+              </div>
+
+              <SegmentedControl
+                aria-labelledby="content-language-heading"
+                className="grid grid-cols-2 md:grid-cols-4"
+                items={supportedLanguages.map((lang) => ({
+                  value: lang,
+                  label: languageNames[lang],
+                  disabled: languageLoading,
+                }))}
+                value={contentLanguage}
+                onChange={(lang) => setContentLanguage(lang as SupportedLanguage)}
+              />
+            </div>
+          </section>
+
+          {/* Display Settings Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-panel-hover pb-2">
+              <Monitor className="w-4 h-4" />
+              <h2 className="font-serif text-xl font-bold text-ink text-balance">
+                {t('settings.display.title')}
+              </h2>
+            </div>
+
+            <ToggleSwitch
+              checked={effectsEnabled}
+              onCheckedChange={setEffectsEnabled}
+              label={t('settings.display.backgroundEffects')}
+              description={t('settings.display.backgroundEffectsDescription')}
+            />
+          </section>
+
+          {/* Danger Zone */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-destructive pb-2">
+              <Warning className="w-4 h-4 text-destructive" />
+              <h2 className="font-serif text-xl font-bold text-ink text-balance">
+                {t('settings.dangerZone')}
+              </h2>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-6">
+              {/* Clear API Keys */}
+              <div className="border border-destructive bg-destructive-tint p-6 space-y-4">
+                <div>
+                  <h3 className="font-serif text-lg font-bold text-ink text-balance mb-1">
+                    {t('settings.clearApiKeys')}
+                  </h3>
+                  <p className="text-xs text-ink-soft text-pretty">
+                    {t('settings.clearApiKeysDescription')}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline-destructive"
+                  className="w-full"
+                  onClick={() => setShowClearApiKeysDialog(true)}
+                  disabled={isResetting}
+                >
+                  <Key className="w-4 h-4" />
+                  {t('settings.clearApiKeys')}
+                </Button>
+              </div>
+
+              {/* Reset Database */}
+              <div className="border border-destructive bg-destructive-tint p-6 space-y-4">
+                <div>
+                  <h3 className="font-serif text-lg font-bold text-ink text-balance mb-1">
+                    {t('settings.resetDatabase')}
+                  </h3>
+                  <p className="text-xs text-ink-soft text-pretty">
+                    {t('settings.resetDatabaseDescription')}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="w-full"
+                  onClick={() => setShowResetDatabaseDialog(true)}
+                  disabled={isResetting}
+                >
+                  <Trash className="w-4 h-4" />
+                  {t('settings.resetDatabase')}
+                </Button>
+              </div>
+            </div>
+          </section>
+
+          <SettingsAbout />
+        </div>
+
+        {/* Footer */}
+        <div className="bg-canvas p-4 border-t border-ink flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <Image
+              src="/logo.svg"
+              alt="Resume Matcher"
+              width={20}
+              height={20}
+              className="w-5 h-5"
+            />
+            <span className="font-mono text-xs text-steel">{getVersionString().toUpperCase()}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {statusLoading ? (
+              <>
+                <SpinnerGap className="size-4 animate-spin text-steel" />
+                <span className="font-mono text-xs text-steel">
+                  {t('settings.footer.status.checking')}
+                </span>
+              </>
+            ) : systemStatus ? (
+              <StatusIndicator tone={systemStatus.status === 'ready' ? 'ready' : 'warning'}>
+                {systemStatus.status === 'ready'
+                  ? t('settings.footer.status.ready')
+                  : t('settings.footer.status.setupRequired')}
+              </StatusIndicator>
+            ) : (
+              <span className="font-mono text-xs text-steel">
+                {t('settings.footer.status.offline')}
+              </span>
+            )}
+          </div>
+        </div>
+      </PageFrame>
+
+      <SubscriptionRiskDialog
+        provider={riskProvider}
+        onAccept={() => {
+          if (riskProvider) switchProvider(riskProvider);
+          setRiskProvider(null);
+        }}
+        onCancel={() => setRiskProvider(null)}
+      />
+
+      <ConfirmDialog
+        open={keyToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setKeyToDelete(null);
+        }}
+        title={t('settings.apiKeys.deleteConfirmTitle')}
+        description={t('settings.apiKeys.deleteConfirmDescription', {
+          provider: keyToDelete ? (API_KEY_PROVIDER_INFO[keyToDelete]?.name ?? keyToDelete) : '',
+        })}
+        confirmLabel={t('common.delete')}
+        variant="danger"
+        onConfirm={() => {
+          if (keyToDelete) void handleDeleteApiKey(keyToDelete);
+        }}
+      />
+
+      <ConfirmDialog
+        open={showClearApiKeysDialog}
+        onOpenChange={setShowClearApiKeysDialog}
+        title={t('confirmations.clearApiKeys')}
+        description={t('confirmations.clearApiKeysDescription')}
+        confirmLabel={t('common.delete')}
+        variant="danger"
+        onConfirm={handleClearApiKeys}
+      />
+
+      <ConfirmDialog
+        open={showResetDatabaseDialog}
+        onOpenChange={setShowResetDatabaseDialog}
+        title={t('confirmations.resetDatabase')}
+        description={t('confirmations.resetDatabaseDescription')}
+        confirmLabel={t('common.reset')}
+        variant="danger"
+        onConfirm={handleResetDatabase}
+      />
+
+      <ConfirmDialog
+        open={showSuccessDialog}
+        onOpenChange={setShowSuccessDialog}
+        title={successMessage.title}
+        description={successMessage.description}
+        confirmLabel={t('common.close')}
+        showCancelButton={false}
+        variant="success"
+        onConfirm={() => setShowSuccessDialog(false)}
+      />
+    </>
+  );
+}

@@ -1,0 +1,213 @@
+@import 'tailwindcss';
+
+@source "../../../{app,components,hooks,lib,messages}/**/*.{js,ts,jsx,tsx,mdx}";
+
+/* Swiss palette — the single source of colour (spec §4.1). Hex values (oklch in
+   comments). tests/swiss-contrast.test.ts asserts WCAG 2.2 AA for every pairing
+   the UI uses; run it after any change. */
+:root {
+  --sw-canvas: #f0f0e8;
+  --sw-white: #ffffff;
+  --sw-ink: #000000;
+  --sw-ink-soft: #3d424c; /* oklch(37.8% 0.018 264) body text (house) */
+  --sw-steel: #696d75; /* oklch(53.4% 0.013 264) secondary text, placeholders, hairlines. Never on panel. */
+  --sw-paper: #f5f5f0; /* sub-panel and header tint */
+  --sw-panel: #e5e5e0; /* secondary fills, dialog footer */
+  --sw-panel-hover: #d8d8d2;
+  --sw-primary: #1d4ed8; /* Hyper Blue */
+  --sw-primary-hover: #193cb8;
+  --sw-success: #127e3b;
+  --sw-success-hover: #016630;
+  --sw-destructive: #d61e21;
+  --sw-destructive-hover: #be0010;
+  --sw-warning: #f97316; /* fill, squares and borders only, always with ink text */
+  --sw-warning-hover: #eb5601;
+  --sw-warning-text: #b44f02;
+  --sw-info-tint: #eff6ff;
+  --sw-success-tint: #f0fdf4;
+  --sw-warning-tint: #fff7ed;
+  --sw-destructive-tint: #fef2f2;
+  --sw-highlight: #fff085; /* keyword <mark> only */
+  --sw-overlay: rgb(0 0 0 / 0.5); /* dialog backdrop */
+}
+
+@theme inline {
+  --color-canvas: var(--sw-canvas);
+  --color-ink: var(--sw-ink);
+  --color-ink-soft: var(--sw-ink-soft);
+  --color-steel: var(--sw-steel);
+  --color-paper: var(--sw-paper);
+  --color-panel: var(--sw-panel);
+  --color-panel-hover: var(--sw-panel-hover);
+  --color-primary: var(--sw-primary);
+  --color-primary-hover: var(--sw-primary-hover);
+  --color-success: var(--sw-success);
+  --color-success-hover: var(--sw-success-hover);
+  --color-destructive: var(--sw-destructive);
+  --color-destructive-hover: var(--sw-destructive-hover);
+  --color-warning: var(--sw-warning);
+  --color-warning-hover: var(--sw-warning-hover);
+  --color-warning-text: var(--sw-warning-text);
+  --color-info-tint: var(--sw-info-tint);
+  --color-success-tint: var(--sw-success-tint);
+  --color-warning-tint: var(--sw-warning-tint);
+  --color-destructive-tint: var(--sw-destructive-tint);
+  --color-highlight: var(--sw-highlight);
+  --color-overlay: var(--sw-overlay);
+
+  /* Hard offset shadows — never blurred. Roles (spec §4.3, owner amendment 2026-10-10):
+     solid ink for what floats or presses: sm = controls, default = menus,
+     lg = dialogs and page frame, xl = home hero, card = resume sheet.
+     nested = translucent ink for every card, panel or box inside a page or dialog. */
+  --shadow-sw-sm: 2px 2px 0px 0px #000000;
+  --shadow-sw-default: 4px 4px 0px 0px #000000;
+  --shadow-sw-card: 6px 6px 0px 0px #000000;
+  --shadow-sw-lg: 8px 8px 0px 0px #000000;
+  --shadow-sw-xl: 12px 12px 0px 0px #000000;
+  --shadow-sw-nested: 4px 4px 0px 0px rgb(0 0 0 / 0.15);
+
+  /* Fonts: exactly what rendered before the realignment (spec D3). */
+  --font-sans: Helvetica, Arial, sans-serif;
+  --font-mono: var(--font-space-grotesk), 'Space Grotesk', sans-serif;
+
+  /* Motion (spec §7): one curve; the 100ms press tier is the default transition. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --default-transition-duration: 100ms;
+  --default-transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Light theme only. */
+
+@layer base {
+  * {
+    @apply border-ink outline-primary/50;
+  }
+  body {
+    @apply bg-canvas text-ink;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .resume-print,
+  .resume-print *,
+  .cover-letter-print,
+  .cover-letter-print * {
+    visibility: visible !important;
+  }
+
+  .resume-print,
+  .cover-letter-print {
+    width: 100% !important;
+    max-width: 210mm !important;
+    min-height: 0 !important;
+    position: static !important;
+    margin: 0 auto !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+  }
+
+  .resume-body {
+    box-shadow: none !important;
+    background: #ffffff !important;
+  }
+
+  .resume-scale {
+    transform: none !important;
+    scale: 1 !important;
+  }
+
+  a {
+    color: #000000 !important;
+    text-decoration: none !important;
+  }
+}
+
+/* ============================================
+   PAGE BREAK CONTROL
+   Every template marks its sections, headings and entries with data attributes
+   (components/resume/page-break-attrs.ts): module class names are hashed, so
+   these rules key on the attributes. The builder preview's pagination
+   (components/preview/page-breaks.ts) reads the same attributes, so the preview
+   breaks pages where the PDF does. Sections may span pages.
+   ============================================ */
+
+/* Each bullet stays whole; a non-split entry stays on one page. 'split' entries
+ * (default for 2+ bullets) can break between any two bullets. Relaxed from the
+ * earlier "keep header + first 2 bullets together" chain, which was pushing
+ * long entries entirely to the next page and leaving half-empty page 1
+ * (user feedback 2026-11-04). */
+[data-resume-item],
+[data-no-break],
+[data-resume-section] li {
+  break-inside: avoid;
+}
+
+[data-resume-item='split'] {
+  break-inside: auto;
+}
+
+/* Section titles still prefer not to orphan at the bottom of a page, but only
+ * as a soft hint — no forced "stay with first entry" chain. If a long entry
+ * can't fit, Chrome will split it between bullets rather than push the whole
+ * section down. */
+[data-resume-section-title] {
+  break-after: avoid;
+}
+
+[data-resume-section] p {
+  orphans: 2;
+  widows: 2;
+}
+
+/* Home hero entrance (spec D10): one-shot, 300ms expo, staggered. CSS, not
+   Motion, so first paint never waits for the lazy Motion chunk. */
+@keyframes hero-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.hero-enter {
+  animation: hero-enter 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.hero-enter-delay-2 {
+  animation-delay: 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-enter {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

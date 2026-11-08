@@ -1,0 +1,180 @@
+@import './_tokens.css';
+
+/*
+  Vivid Template
+  ID: vivid (vivid-single reuses these styles in one column)
+
+  Colorful two-column "Awesome-CV" lineage: two-tone accent name, monospace title +
+  circular-icon contact row, accent uppercase section headers, accent arrow bullets.
+  Reads the accent-color control (--resume-accent-primary, default blue).
+
+  PDF text layer: no small caps and no opacity on text, in either layout. Chromium
+  draws small caps from the font's alternate glyphs, and on some fonts the PDF text
+  layer maps those to private-use codepoints, so an ATS reads "Snior Softwar Enginr".
+  Text at partial opacity is wrapped in a transparency group that an ATS's PDF text
+  extraction can skip (it reads "Sarah", never "Sarah Chen"). So headings and roles are
+  real capitals at a smaller size (`sectionTitleCaps`, `sectionTitleSm`, `entryRoleCaps`)
+  and the lighter surname is a solid tint (`nameRestSolid`).
+*/
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 63fr) minmax(0, 37fr);
+  gap: calc(var(--section-gap) * 1.25);
+  margin-top: var(--section-gap);
+  align-items: start;
+}
+
+.mainColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--section-gap);
+  padding-right: 0.875rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sidebarColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--section-gap);
+  padding-left: 0.75rem;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* Two-tone name */
+.nameFirst {
+  font-weight: 800;
+  color: var(--resume-accent-primary);
+}
+
+/*
+  The lighter surname as a solid tint, not `opacity: 0.6` (see the note at the top).
+  No print rule forces the full accent colour on it, unlike .nameFirst.
+*/
+.nameRestSolid {
+  font-weight: 400;
+  color: color-mix(in srgb, var(--resume-accent-primary) 60%, white);
+}
+
+/* Monospace title + contact row */
+.titleLine {
+  font-family: var(--resume-font-mono);
+  font-size: calc(var(--font-size-base) * 1.05);
+  color: var(--resume-text-tertiary);
+  margin-top: 0.15rem;
+  letter-spacing: 0.01em;
+}
+
+.contactRow {
+  font-family: var(--resume-font-mono);
+  font-size: calc(var(--font-size-base) * 0.8);
+  color: var(--resume-text-body);
+}
+
+.contactChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.iconCircle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1px solid var(--resume-border-primary);
+  border-radius: 9999px;
+  color: var(--resume-text-tertiary);
+  flex-shrink: 0;
+}
+
+/* Accent section headers. Used through .sectionTitleCaps below, which makes them capitals. */
+.sectionTitle {
+  font-family: var(--header-font);
+  font-size: calc(var(--font-size-base) * var(--section-header-scale) * 1.1);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--resume-accent-primary);
+  margin-bottom: var(--item-gap);
+  break-after: avoid;
+  page-break-after: avoid;
+  orphans: 3;
+  widows: 3;
+}
+
+/* Sidebar section headers: capitals, sized down from the small caps they replace. */
+.sectionTitleSm {
+  font-family: var(--header-font);
+  font-size: calc(var(--font-size-base) * var(--section-header-scale) * 0.82);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--resume-accent-primary);
+  margin-bottom: var(--item-gap);
+  break-after: avoid;
+  page-break-after: avoid;
+}
+
+.arrow {
+  color: var(--resume-accent-primary);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.entryCompany {
+  font-weight: 700;
+  color: var(--resume-text-primary);
+}
+
+.entrySep {
+  color: var(--resume-text-tertiary);
+  padding: 0 0.4em;
+}
+
+.entryRole {
+  letter-spacing: 0.02em;
+  color: var(--resume-text-tertiary);
+}
+
+.entryMeta {
+  font-family: var(--resume-font-mono);
+  font-size: calc(var(--font-size-base) * 0.72);
+  font-weight: 700;
+  color: var(--resume-text-tertiary);
+}
+
+/* Real capitals instead of small caps (see the note at the top). */
+.sectionTitleCaps {
+  composes: sectionTitle;
+  text-transform: uppercase;
+  font-size: calc(var(--font-size-base) * var(--section-header-scale) * 0.95);
+  letter-spacing: 0.06em;
+}
+
+.entryRoleCaps {
+  composes: entryRole;
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.04em;
+}
+
+@media print {
+  .nameFirst,
+  .sectionTitle,
+  .sectionTitleSm,
+  .arrow {
+    color: var(--resume-accent-primary) !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .sectionTitle,
+  .sectionTitleSm {
+    break-after: avoid !important;
+    page-break-after: avoid !important;
+  }
+}

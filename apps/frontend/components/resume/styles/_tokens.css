@@ -1,0 +1,29 @@
+.resume-body {
+  /* Typography — UNIFIED FONT STACK.
+   * Dates, metadata, contact lines and pills all share this token. Keeping it
+   * aligned to --unified-font (set in _base.module.css) means the whole resume
+   * renders in one typeface (user feedback 2026-11-04). CJK fallbacks kept
+   * at the end so Chinese/Japanese/Korean text uses the bundled Noto fonts
+   * instead of the browser's last-resort font. */
+  --resume-font-mono:
+    'Helvetica Neue', Helvetica, Arial, ui-sans-serif, system-ui, sans-serif,
+    var(--font-noto-sans-sc), var(--font-noto-sans-jp), var(--font-noto-sans-kr);
+
+  /* Text colors */
+  --resume-text-primary: #000000;
+  --resume-text-secondary: #374151; /* gray-700 */
+  --resume-text-tertiary: #4b5563; /* gray-600 */
+  --resume-text-body: #1f2937; /* gray-800 */
+
+  /* Border colors */
+  --resume-border-primary: #9ca3af; /* gray-400 */
+  --resume-border-secondary: #d1d5db; /* gray-300 */
+  --resume-border-tertiary: #e5e7eb; /* gray-200 */
+
+  /* Accent */
+  --resume-accent-bg: #f3f4f6; /* gray-100 */
+
+  /* Theme accent colors (defaults, overridden by JS) */
+  --resume-accent-primary: #1d4ed8; /* blue - default */
+  --resume-accent-light: #dbeafe; /* blue light - default */
+}

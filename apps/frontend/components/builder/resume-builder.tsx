@@ -1,0 +1,2315 @@
+'use client';
+
+import React, { useState, useEffect, Suspense, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { type ResumeData } from '@/components/dashboard/resume-component';
+import { ResumeForm } from './resume-form';
+import { FormattingControls } from './formatting-controls';
+import { CoverLetterEditor } from './cover-letter-editor';
+import { OutreachEditor } from './outreach-editor';
+import { CoverLetterPreview } from './cover-letter-preview';
+import { OutreachPreview } from './outreach-preview';
+import { GeneratePrompt } from './generate-prompt';
+import { InterviewPrepView } from './interview-prep-view';
+import { CommunityLinks } from '@/components/common/community-links';
+import { Button } from '@/components/ui/button';
+import { RetroTabs } from '@/components/ui/retro-tabs';
+import { PageHeader } from '@/components/ui/page-header';
+import { PanelHeader } from '@/components/ui/panel-header';
+import { StatusIndicator } from '@/components/ui/status-indicator';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Alert } from '@/components/ui/alert';
+import { ConfirmDialog, type ConfirmDialogProps } from '@/components/ui/confirm-dialog';
+import {
+  DownloadSimple,
+  FloppyDisk,
+  ArrowLeft,
+  ArrowCounterClockwise,
+  SpinnerGap,
+} from '@phosphor-icons/react';
+import {
+  useResumePreview,
+  type InterviewPrepData,
+} from '@/components/common/resume_previewer_context';
+import { PaginatedPreview } from '@/components/preview';
+import {
+  downloadResumePdf,
+  downloadCoverLetterPdf,
+  getResumePdfUrl,
+  getCoverLetterPdfUrl,
+  fetchResume,
+  updateResume,
+  updateCoverLetter,
+  updateOutreachMessage,
+  generateCoverLetter,
+  generateOutreachMessage,
+  generateInterviewPrep,
+  fetchJobDescription,
+  updateResumeTemplateSettings,
+} from '@/lib/api/resume';
+import { JDComparisonView } from './jd-comparison-view';
+import { AtsCheckView } from './ats-check-view';
+import { WritingPanel } from './writing-panel';
+import { AtsScorePanel } from './ats-score-panel';
+import { RegenerateWizard } from './regenerate-wizard';
+import { useRegenerateWizard } from '@/hooks/use-regenerate-wizard';
+import { useTranslations } from '@/lib/i18n';
+import { DEFAULT_TEMPLATE_SETTINGS, type TemplateSettings } from '@/lib/types/template-settings';
+import { withLocalizedDefaultSections } from '@/lib/utils/section-helpers';
+import { useLanguage } from '@/lib/context/language-context';
+import { buildResumeFilename, downloadBlobAsFile, openUrlInNewTab } from '@/lib/utils/download';
+import { normalizeResumeForRender, normalizeResumeForSave } from '@/lib/utils/resume-normalization';
+import {
+  buildResumeDraft,
+  getResumeDraftStorageKey,
+  LEGACY_RESUME_DRAFT_STORAGE_KEY,
+  parseResumeDraft,
+  isResumeDataShape,
+  isSameResumeData,
+  safeStorage,
+  shouldPromptForDraftRestore,
+  type ResumeDraftEnvelope,
+} from '@/lib/utils/resume-draft-storage';
+import type { RegenerateItemInput } from '@/lib/api/enrichment';
+import { AgentPromptDialog, type AgentTask } from '@/components/agent/agent-prompt-dialog';
+import { useAgentRefresh } from '@/hooks/use-agent-refresh';
+import { clearResumeWizardCompletion } from '@/lib/utils/resume-wizard-storage';
+import {
+  clearAttachmentDraft,
+  readAttachmentDraft,
+  writeAttachmentDraft,
+  type AttachmentDraftEnvelope,
+} from '@/lib/utils/attachment-draft-storage';
+
+type TabId =
+  | 'resume'
+  | 'cover-letter'
+  | 'outreach'
+  | 'interview-prep'
+  | 'jd-match'
+  | 'ats-check'
+  | 'writing';
+type JobContextStatus = 'idle' | 'loading' | 'available' | 'missing';
+
+const TAB_IDS: TabId[] = [
+  'resume',
+  'cover-letter',
+  'outreach',
+  'interview-prep',
+  'jd-match',
+  'ats-check',
+  'writing',
+];
+const RESUME_AUTOSAVE_DEBOUNCE_MS = 2500;
+const FORMATTING_SAVE_DEBOUNCE_MS = 600;
+const RESUME_AUTOSAVE_MAX_WAIT_MS = 12000;
+// Floor for the computed delay. Without it, once an unsynced streak exceeds the
+// max wait the delay pins to 0 and every keystroke schedules an immediate
+// full-document PATCH.
+// This floor deliberately wins over the remaining max-wait budget, so a save
+// can land up to MIN_DELAY after MAX_WAIT elapses. MAX_WAIT is a target for
+// how long edits may stay unsynced, not a hard deadline — dropping the floor
+// to honour it exactly is what produced one PATCH per keystroke.
+const RESUME_AUTOSAVE_MIN_DELAY_MS = 500;
+
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+const getTabFromSearchParams = (searchParams: Pick<URLSearchParams, 'get'>): TabId => {
+  const tab = searchParams.get('tab');
+  return TAB_IDS.includes(tab as TabId) ? (tab as TabId) : 'resume';
+};
+
+const buildInitialData = (t: Translate): ResumeData => ({
+  personalInfo: {
+    name: t('builder.personalInfoForm.placeholders.name'),
+    title: t('builder.personalInfoForm.placeholders.title'),
+    email: t('builder.personalInfoForm.placeholders.email'),
+    phone: t('builder.personalInfoForm.placeholders.phone'),
+    location: t('builder.personalInfoForm.placeholders.location'),
+    website: t('builder.personalInfoForm.placeholders.website'),
+    linkedin: t('builder.personalInfoForm.placeholders.linkedin'),
+    github: t('builder.personalInfoForm.placeholders.github'),
+  },
+  summary: t('builder.placeholders.summary'),
+  workExperience: [],
+  education: [],
+  personalProjects: [],
+  additional: {
+    technicalSkills: [],
+    languages: [],
+    certificationsTraining: [],
+    awards: [],
+  },
+});
+
+type StoredResumeDraft = ResumeDraftEnvelope & { storageKey: string };
+
+type ServerResume = Awaited<ReturnType<typeof fetchResume>>;
+type OwnWrites = { pending: number; epoch: number };
+/** The parts of a resume the agent can change and the editor saves separately. */
+type AgentPart = 'resume' | 'coverLetter' | 'outreach';
+
+/** Identifies one saved version of the parts the agent can change. */
+const agentVersionOf = (data: ServerResume): string =>
+  JSON.stringify([
+    data.processed_resume,
+    data.cover_letter ?? '',
+    data.outreach_message ?? '',
+    data.title ?? null,
+  ]);
+
+/**
+ * Count a write this editor makes. While one is pending, or when one finished
+ * during an agent-change check, the server copy may be the editor's own save,
+ * so the check skips that round.
+ */
+const trackOwnWrite = <T,>(writes: { current: OwnWrites }, write: Promise<T>): Promise<T> => {
+  writes.current = { pending: writes.current.pending + 1, epoch: writes.current.epoch + 1 };
+  return write.finally(() => {
+    writes.current = { pending: writes.current.pending - 1, epoch: writes.current.epoch + 1 };
+  });
+};
+
+const withStorageKey = (
+  draft: ResumeDraftEnvelope | null,
+  storageKey: string
+): StoredResumeDraft | null => {
+  return draft ? { ...draft, storageKey } : null;
+};
+
+const readStoredResumeDraft = (resumeId: string | null): StoredResumeDraft | null => {
+  const scopedKey = getResumeDraftStorageKey(resumeId);
+  const scopedDraft = withStorageKey(
+    parseResumeDraft(safeStorage.get(scopedKey), resumeId),
+    scopedKey
+  );
+  if (scopedDraft) {
+    return scopedDraft;
+  }
+
+  const legacyDraft = withStorageKey(
+    parseResumeDraft(safeStorage.get(LEGACY_RESUME_DRAFT_STORAGE_KEY), resumeId, Date.now(), {
+      allowLegacyPlainData: !resumeId,
+    }),
+    LEGACY_RESUME_DRAFT_STORAGE_KEY
+  );
+
+  return legacyDraft;
+};
+
+const writeStoredResumeDraft = (resumeId: string | null, data: ResumeData): boolean => {
+  try {
+    return safeStorage.set(
+      getResumeDraftStorageKey(resumeId),
+      JSON.stringify(buildResumeDraft(resumeId, data))
+    );
+  } catch {
+    return false;
+  }
+};
+
+const clearStoredResumeDraft = (resumeId: string | null): void => {
+  // Only clear this resume's own scoped key. Removing the legacy key here too
+  // would destroy a pre-upgrade draft for a *different* (new, unsaved) resume,
+  // which the read path deliberately only surfaces when there is no resumeId.
+  safeStorage.remove(getResumeDraftStorageKey(resumeId));
+};
+
+const clearResumeDraftStorageKey = (storageKey: string): void => {
+  safeStorage.remove(storageKey);
+};
+
+interface ResumeBuilderProps {
+  /** The user's coding agent does the AI work: AI actions show a prompt for it. */
+  agentMode?: boolean;
+}
+
+const ResumeBuilderContent = ({ agentMode = false }: ResumeBuilderProps) => {
+  const { t } = useTranslations();
+  const { uiLanguage, contentLanguage } = useLanguage();
+  const [notificationDialog, setNotificationDialog] = useState<{
+    title: string;
+    description: string;
+    variant: NonNullable<ConfirmDialogProps['variant']>;
+  } | null>(null);
+
+  const showNotification = useCallback(
+    (
+      description: string,
+      variant: NonNullable<ConfirmDialogProps['variant']> = 'default',
+      title?: string
+    ) => {
+      const fallbackTitle = variant === 'success' ? t('common.success') : t('common.error');
+      setNotificationDialog({
+        title: title ?? fallbackTitle,
+        description,
+        variant,
+      });
+    },
+    [t]
+  );
+
+  const initialData = useMemo(() => buildInitialData(t), [t]);
+  const [resumeData, setResumeData] = useState<ResumeData>(() => initialData);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [lastSavedData, setLastSavedData] = useState<ResumeData>(() => initialData);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isAutoSaving, setIsAutoSaving] = useState(false);
+  const [autoSaveError, setAutoSaveError] = useState<string | null>(null);
+  const [lastAutoSavedAt, setLastAutoSavedAt] = useState<number | null>(null);
+  const [pendingDraftRestore, setPendingDraftRestore] = useState<StoredResumeDraft | null>(null);
+  const [pendingAttachmentDraftRestore, setPendingAttachmentDraftRestore] =
+    useState<AttachmentDraftEnvelope | null>(null);
+  const [showLeaveWithLocalDraftDialog, setShowLeaveWithLocalDraftDialog] = useState(false);
+  const [hasCurrentLocalDraft, setHasCurrentLocalDraft] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [loadingState, setLoadingState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  // The resume's own formatting, applied when it loads. A resume never formatted
+  // keeps the defaults.
+  const [templateSettings, setTemplateSettings] =
+    useState<TemplateSettings>(DEFAULT_TEMPLATE_SETTINGS);
+  const [formattingSaveFailed, setFormattingSaveFailed] = useState(false);
+  const pendingFormattingRef = useRef<{
+    resumeId: string;
+    settings: TemplateSettings;
+    order: { session: string; revision: number };
+  } | null>(null);
+  const formattingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // This builder session's id and save counter (see updateResumeTemplateSettings).
+  const formattingSessionRef = useRef<string | null>(null);
+  const formattingRevisionRef = useRef(0);
+  const { improvedData } = useResumePreview();
+  const improvedPreview = improvedData?.data?.resume_preview;
+  const improvedCoverLetter = improvedData?.data?.cover_letter;
+  const improvedOutreach = improvedData?.data?.outreach_message;
+  const improvedInterviewPrep = improvedData?.data?.interview_prep ?? null;
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const resumeId = searchParams.get('id');
+  // Monotonic edit counter. It is deliberately never reset: two savers can be
+  // in flight (a queued manual flush behind an autosave), and resetting it to 0
+  // on whichever finishes first invalidated the other's captured baseline, so a
+  // save that actually succeeded reported failure. "Everything is synced" is
+  // now `editVersionRef === syncedVersionRef`, which no other saver can forge.
+  const editVersionRef = useRef(0);
+  const syncedVersionRef = useRef(0);
+  const resumeSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const unsyncedSinceRef = useRef<number | null>(null);
+  const documentIsActiveRef = useRef(true);
+
+  useEffect(() => {
+    documentIsActiveRef.current = true;
+    return () => {
+      documentIsActiveRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (resumeId || hasUnsavedChanges || improvedPreview) {
+      return;
+    }
+    const savedDraft = readStoredResumeDraft(null);
+    if (savedDraft) {
+      return;
+    }
+    setResumeData(initialData);
+    setLastSavedData(initialData);
+  }, [initialData, resumeId, hasUnsavedChanges, improvedPreview]);
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<TabId>(() => getTabFromSearchParams(searchParams));
+
+  useEffect(() => {
+    setActiveTab(getTabFromSearchParams(searchParams));
+  }, [searchParams]);
+
+  // Cover letter & outreach state
+  const [coverLetter, setCoverLetter] = useState('');
+  const [outreachMessage, setOutreachMessage] = useState('');
+  const [interviewPrep, setInterviewPrep] = useState<InterviewPrepData | null>(null);
+  const [isCoverLetterSaving, setIsCoverLetterSaving] = useState(false);
+  const [isOutreachSaving, setIsOutreachSaving] = useState(false);
+  const [hasUnsavedCoverLetter, setHasUnsavedCoverLetter] = useState(false);
+  const [hasUnsavedOutreach, setHasUnsavedOutreach] = useState(false);
+  const [hasCurrentAttachmentDraft, setHasCurrentAttachmentDraft] = useState(false);
+  const hasCurrentRecoveryDraft =
+    (!hasUnsavedChanges || hasCurrentLocalDraft) &&
+    (!(hasUnsavedCoverLetter || hasUnsavedOutreach) || hasCurrentAttachmentDraft);
+  const attachmentValuesRef = useRef({ coverLetter: '', outreachMessage: '' });
+  const attachmentBaselinesRef = useRef({ coverLetter: '', outreachMessage: '' });
+  const coverLetterEditVersionRef = useRef(0);
+  const outreachEditVersionRef = useRef(0);
+  const coverLetterSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const coverLetterSaveCountRef = useRef(0);
+  const outreachSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const outreachSaveCountRef = useRef(0);
+  const [resumeTitle, setResumeTitle] = useState<string | null>(null);
+
+  // On-demand generation state
+  const [isTailoredResume, setIsTailoredResume] = useState(false);
+  const [isGeneratingCoverLetter, setIsGeneratingCoverLetter] = useState(false);
+  const [isGeneratingOutreach, setIsGeneratingOutreach] = useState(false);
+  const [isGeneratingInterviewPrep, setIsGeneratingInterviewPrep] = useState(false);
+  const [interviewPrepError, setInterviewPrepError] = useState<string | null>(null);
+  const [showRegenerateDialog, setShowRegenerateDialog] = useState<
+    'cover-letter' | 'outreach' | 'interview-prep' | null
+  >(null);
+  const [agentTask, setAgentTask] = useState<AgentTask | null>(null);
+  // Agent mode: the agent's saved version, waiting while the user has unsaved
+  // edits to the same part, and when one was last applied here.
+  const [agentUpdate, setAgentUpdate] = useState<ServerResume | null>(null);
+  const [agentAppliedAt, setAgentAppliedAt] = useState<number | null>(null);
+  // Remounts the resume form only when the agent replaced the resume itself, so
+  // in-progress form state survives agent updates to other parts.
+  const [resumeFormKey, setResumeFormKey] = useState(0);
+  const ownWritesRef = useRef<OwnWrites>({ pending: 0, epoch: 0 });
+  const lastSavedDataRef = useRef<ResumeData>(initialData);
+  const agentCheckRunningRef = useRef(false);
+  const dismissedAgentVersionRef = useRef<string | null>(null);
+
+  // JD comparison state
+  const [jobDescription, setJobDescription] = useState<string | null>(null);
+  // The job's saved keywords (null when it has none) and company, for JD Match.
+  const [jobKeywords, setJobKeywords] = useState<string[] | null>(null);
+  const [jobCompany, setJobCompany] = useState<string | null>(null);
+  const [jobForcedKeywords, setJobForcedKeywords] = useState<string[]>([]);
+  const [jobContextStatus, setJobContextStatus] = useState<JobContextStatus>('idle');
+
+  // AI Regenerate wizard
+  const regenerateWizard = useRegenerateWizard({
+    resumeId: resumeId || '',
+    outputLanguage: contentLanguage,
+    onSuccess: async () => {
+      // Reload resume data after applying changes
+      if (!resumeId) {
+        return;
+      }
+
+      try {
+        const data = await fetchResume(resumeId);
+        // Update resume title for downloads
+        setResumeTitle(data.title ?? null);
+        if (data.processed_resume) {
+          setResumeData(data.processed_resume as ResumeData);
+          setLastSavedData(data.processed_resume as ResumeData);
+          setHasUnsavedChanges(false);
+          syncedVersionRef.current = editVersionRef.current;
+          unsyncedSinceRef.current = null;
+        }
+      } catch (error) {
+        console.error('Failed to reload resume after applying regenerated changes:', error);
+        showNotification(t('builder.alerts.reloadFailed'), 'danger');
+        throw error;
+      }
+    },
+    onError: (errorMessage) => {
+      if (/network|fetch/i.test(errorMessage) || errorMessage.includes('Failed to fetch')) {
+        console.warn('Network error during regeneration or apply:', errorMessage);
+        showNotification(t('builder.regenerate.errors.networkError'), 'danger');
+        return;
+      }
+
+      if (/resume content changed|uniquely matched|please regenerate/i.test(errorMessage)) {
+        console.warn('Regenerated changes were based on a stale resume snapshot:', errorMessage);
+        showNotification(t('builder.regenerate.errors.resumeChanged'), 'danger');
+        return;
+      }
+
+      if (/generate/i.test(errorMessage)) {
+        console.warn('Generation failed:', errorMessage);
+        showNotification(t('builder.regenerate.errors.generationFailed'), 'danger');
+        return;
+      }
+
+      console.error('Error during regeneration or applying regenerated changes:', errorMessage);
+      showNotification(t('builder.regenerate.errors.applyFailed'), 'danger');
+    },
+  });
+
+  const canonicalResumeDataForPreview = useMemo(
+    () => normalizeResumeForRender(resumeData),
+    [resumeData]
+  );
+
+  // Build regenerate items from canonical resume data so apply checks match the saved snapshot.
+  const experienceItemsForRegenerate: RegenerateItemInput[] = useMemo(() => {
+    return (canonicalResumeDataForPreview.workExperience || []).map((exp, idx) => ({
+      item_id: `exp_${idx}`,
+      item_type: 'experience' as const,
+      title: exp.title ?? '',
+      subtitle: exp.company || undefined,
+      current_content: Array.isArray(exp.description) ? exp.description : [],
+    }));
+  }, [canonicalResumeDataForPreview.workExperience]);
+
+  const projectItemsForRegenerate: RegenerateItemInput[] = useMemo(() => {
+    return (canonicalResumeDataForPreview.personalProjects || []).map((proj, idx) => ({
+      item_id: `proj_${idx}`,
+      item_type: 'project' as const,
+      title: proj.name ?? '',
+      subtitle: proj.role || undefined,
+      current_content: Array.isArray(proj.description) ? proj.description : [],
+    }));
+  }, [canonicalResumeDataForPreview.personalProjects]);
+
+  const skillsItemForRegenerate: RegenerateItemInput | null = useMemo(() => {
+    const skills = canonicalResumeDataForPreview.additional?.technicalSkills;
+    if (skills && skills.length > 0) {
+      return {
+        item_id: 'skills',
+        item_type: 'skills' as const,
+        title: t('builder.regenerate.selectDialog.skills'),
+        current_content: skills,
+      };
+    }
+    return null;
+  }, [canonicalResumeDataForPreview.additional?.technicalSkills, t]);
+  const localizedResumeDataForPreview = useMemo(
+    () => withLocalizedDefaultSections(canonicalResumeDataForPreview, t),
+    [canonicalResumeDataForPreview, t]
+  );
+
+  // Warn user before leaving with unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsavedChanges || hasUnsavedCoverLetter || hasUnsavedOutreach) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasUnsavedChanges, hasUnsavedCoverLetter, hasUnsavedOutreach]);
+
+  useEffect(() => {
+    // P0: without this, navigating from resume A to resume B before A's GET
+    // resolves lets A's response land under B's id — and because the response
+    // also flips loadingState to 'loaded', autosave then writes A's content
+    // into B. Every state write below is gated on the effect still being
+    // current. (The JD effect below already did this; this one did not.)
+    let cancelled = false;
+
+    const loadResumeData = async () => {
+      if (cancelled) return;
+      setLoadingState('loading');
+      setPendingDraftRestore(null);
+      setPendingAttachmentDraftRestore(null);
+
+      // Priority 1: Fetch from API if ID is in URL (most reliable)
+      if (resumeId) {
+        try {
+          const data = await fetchResume(resumeId);
+          if (cancelled) return;
+          // Prefer processed_resume if available
+          const status = data.raw_resume?.processing_status;
+          if (
+            status === 'processing' ||
+            status === 'failed' ||
+            (status === 'pending' && !isResumeDataShape(data.processed_resume))
+          ) {
+            setLoadingState('error');
+            return;
+          }
+          let serverData: ResumeData | null = null;
+          if (isResumeDataShape(data.processed_resume)) {
+            serverData = data.processed_resume;
+          } else if (data.raw_resume?.content) {
+            try {
+              const parsed: unknown = JSON.parse(data.raw_resume.content);
+              if (isResumeDataShape(parsed)) serverData = parsed;
+            } catch {
+              // Raw content may still be markdown instead of structured JSON.
+            }
+          }
+          if (!serverData) {
+            // Preserve drafts until a usable server baseline has been read.
+            setLoadingState('error');
+            return;
+          }
+          // Track if this is a tailored resume (has parent_id)
+          setIsTailoredResume(Boolean(data.parent_id));
+          // Store resume title for downloads
+          setResumeTitle(data.title ?? null);
+          setTemplateSettings(data.template_settings ?? DEFAULT_TEMPLATE_SETTINGS);
+          setFormattingSaveFailed(false);
+          // These values belong to this resume. Explicitly applying empty values
+          // prevents the preceding document's attachment from surviving a switch.
+          const serverCoverLetter = data.cover_letter ?? '';
+          const serverOutreachMessage = data.outreach_message ?? '';
+          setCoverLetter(serverCoverLetter);
+          setOutreachMessage(serverOutreachMessage);
+          attachmentValuesRef.current = {
+            coverLetter: serverCoverLetter,
+            outreachMessage: serverOutreachMessage,
+          };
+          attachmentBaselinesRef.current = attachmentValuesRef.current;
+          setHasUnsavedCoverLetter(false);
+          setHasUnsavedOutreach(false);
+          const attachmentDraft = readAttachmentDraft(resumeId);
+          if (
+            attachmentDraft &&
+            (attachmentDraft.coverLetter !== serverCoverLetter ||
+              attachmentDraft.outreachMessage !== serverOutreachMessage)
+          ) {
+            setPendingAttachmentDraftRestore(attachmentDraft);
+          } else {
+            clearAttachmentDraft(resumeId);
+          }
+          setInterviewPrep(data.interview_prep ?? null);
+          setInterviewPrepError(null);
+          const localDraft = readStoredResumeDraft(resumeId);
+          setResumeData(serverData);
+          setLastSavedData(serverData);
+          setHasUnsavedChanges(false);
+          setHasCurrentLocalDraft(false);
+          syncedVersionRef.current = editVersionRef.current;
+          unsyncedSinceRef.current = null;
+          setAutoSaveError(null);
+          if (shouldPromptForDraftRestore(localDraft, serverData)) {
+            setPendingDraftRestore(localDraft);
+          } else {
+            clearStoredResumeDraft(resumeId);
+          }
+          setLoadingState('loaded');
+          return;
+        } catch (err) {
+          if (cancelled) return;
+          // Do NOT fall through to the localStorage draft restore below. That
+          // path sets hasUnsavedChanges=true, which arms autosave and would
+          // PATCH a stale draft over a server copy we failed to read and
+          // therefore know nothing about. Surface the failure instead.
+          console.error('Failed to load resume from API:', err);
+          setLoadingState('error');
+          return;
+        }
+      }
+
+      // Priority 2: Improved Data from Context (Tailor Flow)
+      if (improvedPreview) {
+        setIsTailoredResume(Boolean(improvedData?.data?.resume_id && improvedData.data.job_id));
+        setResumeData(improvedPreview);
+        setLastSavedData(improvedPreview);
+        const contextCoverLetter = improvedCoverLetter ?? '';
+        const contextOutreach = improvedOutreach ?? '';
+        setCoverLetter(contextCoverLetter);
+        setOutreachMessage(contextOutreach);
+        attachmentValuesRef.current = {
+          coverLetter: contextCoverLetter,
+          outreachMessage: contextOutreach,
+        };
+        attachmentBaselinesRef.current = attachmentValuesRef.current;
+        setHasUnsavedCoverLetter(false);
+        setHasUnsavedOutreach(false);
+        setInterviewPrep(improvedInterviewPrep);
+        setInterviewPrepError(null);
+        // Persist to localStorage as backup
+        setHasCurrentLocalDraft(writeStoredResumeDraft(resumeId, improvedPreview));
+        setLoadingState('loaded');
+        return;
+      }
+
+      // Priority 3: Restore from localStorage (browser refresh recovery)
+      const savedDraft = readStoredResumeDraft(resumeId);
+      if (savedDraft) {
+        setPendingDraftRestore(savedDraft);
+        setLoadingState('loaded');
+        return;
+      }
+
+      // Fallback: Use initial data
+      setLoadingState('loaded');
+    };
+
+    loadResumeData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    improvedData?.data?.job_id,
+    improvedData?.data?.resume_id,
+    improvedPreview,
+    improvedCoverLetter,
+    improvedOutreach,
+    improvedInterviewPrep,
+    resumeId,
+  ]);
+
+  useEffect(() => {
+    // Scheduling navigation cannot acknowledge that the created resume opened.
+    // This identity-keyed builder retires recovery only after its validated
+    // server baseline is available; failed or abandoned loads retain it.
+    if (resumeId && loadingState === 'loaded') clearResumeWizardCompletion(resumeId);
+  }, [resumeId, loadingState]);
+
+  // Fetch job description when we have a tailored resume
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadJobDescription = async () => {
+      if (isTailoredResume && resumeId) {
+        setJobDescription(null);
+        setJobContextStatus('loading');
+        try {
+          const data = await fetchJobDescription(resumeId);
+          if (!cancelled) {
+            setJobDescription(data.content);
+            setJobKeywords(data.keywords);
+            setJobCompany(data.company);
+            setJobForcedKeywords(data.forced_keywords ?? []);
+            setJobContextStatus('available');
+          }
+        } catch (err) {
+          // JD might not be available for older resumes
+          if (!cancelled) {
+            console.warn('Could not fetch job description:', err);
+            setJobDescription(null);
+            setJobContextStatus('missing');
+          }
+        }
+      } else {
+        // Clear job description when switching to non-tailored resume
+        setJobDescription(null);
+        setJobContextStatus('idle');
+      }
+    };
+
+    loadJobDescription();
+    return () => {
+      cancelled = true;
+    };
+  }, [isTailoredResume, resumeId]);
+
+  const handleUpdate = useCallback(
+    (newData: ResumeData) => {
+      editVersionRef.current += 1;
+      unsyncedSinceRef.current ??= Date.now();
+      setResumeData(newData);
+      setHasUnsavedChanges(true);
+      setAutoSaveError(null);
+      // Auto-save draft to localStorage
+      setHasCurrentLocalDraft(writeStoredResumeDraft(resumeId, newData));
+    },
+    [resumeId]
+  );
+
+  // Sends right away, also while the page unloads (the request is keepalive). Each save
+  // carries the next number in this session, so one that arrives late cannot undo a
+  // newer choice from this tab.
+  const flushFormattingSave = useCallback(() => {
+    if (formattingTimerRef.current) clearTimeout(formattingTimerRef.current);
+    formattingTimerRef.current = null;
+    const pending = pendingFormattingRef.current;
+    pendingFormattingRef.current = null;
+    if (!pending) return;
+    updateResumeTemplateSettings(pending.resumeId, pending.settings, pending.order).then(
+      () => setFormattingSaveFailed(false),
+      (error) => {
+        console.error('Failed to save resume formatting:', error);
+        setFormattingSaveFailed(true);
+      }
+    );
+  }, []);
+
+  // Formatting is saved with the resume, so its view page and PDF match the builder.
+  const handleSettingsChange = useCallback(
+    (newSettings: TemplateSettings) => {
+      // Until the resume (and its saved formatting) has loaded, a change would save
+      // the defaults over it.
+      if (loadingState !== 'loaded') return;
+      setTemplateSettings(newSettings);
+      if (!resumeId) return;
+      formattingSessionRef.current ??= `${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`;
+      pendingFormattingRef.current = {
+        resumeId,
+        settings: newSettings,
+        order: {
+          session: formattingSessionRef.current,
+          revision: ++formattingRevisionRef.current,
+        },
+      };
+      if (formattingTimerRef.current) clearTimeout(formattingTimerRef.current);
+      formattingTimerRef.current = setTimeout(flushFormattingSave, FORMATTING_SAVE_DEBOUNCE_MS);
+    },
+    [resumeId, loadingState, flushFormattingSave]
+  );
+
+  // Save pending formatting before switching resumes, leaving the builder, or a
+  // refresh or tab close (which skip React cleanup).
+  useEffect(() => () => flushFormattingSave(), [resumeId, flushFormattingSave]);
+  useEffect(() => {
+    const onPageHide = () => flushFormattingSave();
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, [flushFormattingSave]);
+
+  useEffect(() => {
+    lastSavedDataRef.current = lastSavedData;
+  }, [lastSavedData]);
+
+  /**
+   * Agent mode, before a resume save: the agent's version if it saved the resume
+   * since this editor last loaded or saved it. The periodic check can miss that
+   * window (autosave runs sooner), and saving then would silently replace the
+   * agent's work. Returns null when the server copy is the editor's own, when a
+   * save of ours is in flight (the difference is then most likely ours), or when
+   * the server cannot be read (saving proceeds as before).
+   */
+  const findAgentConflict = useCallback(
+    async (part: AgentPart): Promise<ServerResume | null> => {
+      if (!agentMode || !resumeId || ownWritesRef.current.pending > 0) return null;
+      try {
+        const data = await fetchResume(resumeId);
+        const baselines = attachmentBaselinesRef.current;
+        const changed =
+          part === 'resume'
+            ? isResumeDataShape(data.processed_resume) &&
+              !isSameResumeData(data.processed_resume, lastSavedDataRef.current)
+            : part === 'coverLetter'
+              ? (data.cover_letter ?? '') !== baselines.coverLetter
+              : (data.outreach_message ?? '') !== baselines.outreachMessage;
+        if (!changed || agentVersionOf(data) === dismissedAgentVersionRef.current) return null;
+        return data;
+      } catch (error) {
+        console.warn('Could not check for agent changes before saving:', error);
+        return null;
+      }
+    },
+    [agentMode, resumeId]
+  );
+
+  /**
+   * Whether saving `part` now is safe. While the user has not chosen between
+   * their edits and the agent's version, or when the agent has just saved this
+   * part, it shows the banner (and, with `notify`, says why) and returns false.
+   */
+  const agentAllowsSave = useCallback(
+    async (part: AgentPart, notify: boolean): Promise<boolean> => {
+      const agentVersion = agentUpdate ?? (await findAgentConflict(part));
+      if (!agentVersion) return true;
+      setAgentUpdate(agentVersion);
+      if (notify) showNotification(t('builder.agentUpdate.chooseFirst'), 'warning');
+      return false;
+    },
+    [agentUpdate, findAgentConflict, showNotification, t]
+  );
+
+  const queueResumeSave = useCallback(
+    (editorData: ResumeData) => {
+      if (!resumeId) {
+        return Promise.reject(new Error('Resume ID is required to save.'));
+      }
+
+      const canonicalPayload = normalizeResumeForSave(editorData);
+      const runSave = trackOwnWrite(
+        ownWritesRef,
+        resumeSaveQueueRef.current
+          .catch(() => {
+            // Keep the queue alive after a failed save so the next edit can still persist.
+          })
+          .then(() => {
+            if (!documentIsActiveRef.current) {
+              throw new DOMException('Editor closed', 'AbortError');
+            }
+            return updateResume(resumeId, canonicalPayload);
+          })
+      );
+
+      resumeSaveQueueRef.current = runSave.then(
+        () => undefined,
+        () => undefined
+      );
+
+      return runSave.then((response) => ({ response, canonicalPayload }));
+    },
+    [resumeId]
+  );
+
+  useEffect(() => {
+    if (
+      !resumeId ||
+      // Never PATCH before the server copy has been read. Until then resumeData
+      // still holds i18n placeholders, and a full-document replace would
+      // overwrite the real resume with them.
+      loadingState !== 'loaded' ||
+      !hasUnsavedChanges ||
+      isSaving ||
+      isAutoSaving ||
+      autoSaveError ||
+      regenerateWizard.step !== 'idle' ||
+      // The user has not chosen between their edits and the agent's version.
+      agentUpdate
+    ) {
+      return;
+    }
+
+    const versionAtSchedule = editVersionRef.current;
+    const editorSnapshot = resumeData;
+    const elapsedSinceStreakStart = unsyncedSinceRef.current
+      ? Date.now() - unsyncedSinceRef.current
+      : 0;
+    const saveDelay = Math.max(
+      RESUME_AUTOSAVE_MIN_DELAY_MS,
+      Math.min(RESUME_AUTOSAVE_DEBOUNCE_MS, RESUME_AUTOSAVE_MAX_WAIT_MS - elapsedSinceStreakStart)
+    );
+    const timerId = window.setTimeout(async () => {
+      setIsAutoSaving(true);
+      // Restart the max-wait window on EVERY attempt, not only on attempts
+      // whose version check happens to match. Otherwise a single edit landing
+      // mid-flight leaves this marker set forever, the computed delay pins to
+      // its floor, and every subsequent keystroke schedules another PATCH.
+      unsyncedSinceRef.current = Date.now();
+      try {
+        const agentVersion = await findAgentConflict('resume');
+        if (agentVersion) {
+          // Ask the user instead; autosave stays paused until they choose.
+          setAgentUpdate(agentVersion);
+          return;
+        }
+        const { response, canonicalPayload } = await queueResumeSave(editorSnapshot);
+        if (!documentIsActiveRef.current) return;
+        // Prefer the server's copy: it may rewrite the payload (e.g. aligning
+        // descriptionStyles), and comparing a stale client payload against the
+        // server state would surface a spurious draft-recovery prompt on reload.
+        setLastSavedData((response?.processed_resume as ResumeData) ?? canonicalPayload);
+        setLastAutoSavedAt(Date.now());
+        setAutoSaveError(null);
+
+        if (editVersionRef.current === versionAtSchedule) {
+          setHasUnsavedChanges(false);
+          syncedVersionRef.current = versionAtSchedule;
+          unsyncedSinceRef.current = null;
+          clearStoredResumeDraft(resumeId);
+          setHasCurrentLocalDraft(false);
+        }
+      } catch (error) {
+        if (!documentIsActiveRef.current) return;
+        console.error('Failed to auto-save resume:', error);
+        setAutoSaveError(t('builder.alerts.autoSaveFailed'));
+      } finally {
+        if (documentIsActiveRef.current) setIsAutoSaving(false);
+      }
+    }, saveDelay);
+
+    return () => window.clearTimeout(timerId);
+  }, [
+    agentUpdate,
+    autoSaveError,
+    findAgentConflict,
+    hasUnsavedChanges,
+    isAutoSaving,
+    isSaving,
+    loadingState,
+    queueResumeSave,
+    regenerateWizard.step,
+    resumeData,
+    resumeId,
+    t,
+  ]);
+
+  const flushResumeChanges = useCallback(
+    async (showErrorDialog = true): Promise<boolean> => {
+      if (!resumeId || (!hasUnsavedChanges && !autoSaveError)) {
+        return true;
+      }
+
+      // Same guard as the autosave effect. Gating only autosave left the
+      // manual Save button able to issue the identical destructive
+      // full-document PATCH while the initial fetch was still in flight,
+      // replacing a real resume with i18n placeholders.
+      if (loadingState !== 'loaded') {
+        return false;
+      }
+
+      try {
+        setIsSaving(true);
+        // Capture the text and its edit number before any wait, so edits typed
+        // meanwhile stay unsaved (and autosave picks them up) instead of being
+        // marked saved.
+        const versionAtFlush = editVersionRef.current;
+        const editorSnapshot = resumeData;
+        // Agent mode: never save over the agent's version before the user has
+        // chosen between it and their edits (Download, Back and Save all land here).
+        if (!(await agentAllowsSave('resume', showErrorDialog))) return false;
+        const { response, canonicalPayload } = await queueResumeSave(editorSnapshot);
+        if (!documentIsActiveRef.current) return false;
+        setLastSavedData((response?.processed_resume as ResumeData) ?? canonicalPayload);
+        setAutoSaveError(null);
+
+        // Compare against syncedVersionRef, not a zeroed counter: an autosave
+        // completing ahead of this queued save used to reset the baseline and
+        // make a successful PATCH look like a failure to the caller.
+        syncedVersionRef.current = Math.max(syncedVersionRef.current, versionAtFlush);
+        if (editVersionRef.current === syncedVersionRef.current) {
+          setHasUnsavedChanges(false);
+          unsyncedSinceRef.current = null;
+          setLastAutoSavedAt(Date.now());
+          clearStoredResumeDraft(resumeId);
+          setHasCurrentLocalDraft(false);
+          return true;
+        }
+
+        return false;
+      } catch (error) {
+        if (!documentIsActiveRef.current) return false;
+        console.error('Failed to save resume:', error);
+        setAutoSaveError(t('builder.alerts.autoSaveFailed'));
+        if (showErrorDialog) {
+          showNotification(t('builder.alerts.saveFailed'), 'danger');
+        }
+        return false;
+      } finally {
+        if (documentIsActiveRef.current) setIsSaving(false);
+      }
+    },
+    [
+      agentAllowsSave,
+      autoSaveError,
+      hasUnsavedChanges,
+      loadingState,
+      queueResumeSave,
+      resumeData,
+      resumeId,
+      showNotification,
+      t,
+    ]
+  );
+
+  const handleSave = async () => {
+    if (!resumeId) {
+      showNotification(t('builder.alerts.saveNotAvailable'), 'warning');
+      return;
+    }
+    await flushResumeChanges(true);
+  };
+
+  const handleReset = () => {
+    const saveInFlight = isSaving || isAutoSaving;
+    setResumeData(lastSavedData);
+
+    // Bump the version so any save already in flight cannot claim the reset
+    // state as synced when it lands — its captured baseline is now stale.
+    editVersionRef.current += 1;
+
+    if (saveInFlight) {
+      // That in-flight PATCH is carrying the edits we just discarded, so the
+      // server is about to hold content the editor no longer shows. Stay dirty
+      // and let autosave push the reset state, converging the two. Marking this
+      // clean is what left the discarded text on the server silently.
+      setHasUnsavedChanges(true);
+      unsyncedSinceRef.current = Date.now();
+      setHasCurrentLocalDraft(writeStoredResumeDraft(resumeId, lastSavedData));
+    } else {
+      setHasUnsavedChanges(false);
+      syncedVersionRef.current = editVersionRef.current;
+      unsyncedSinceRef.current = null;
+      clearStoredResumeDraft(resumeId);
+      setHasCurrentLocalDraft(false);
+    }
+
+    setAutoSaveError(null);
+  };
+
+  const handleRestoreLocalDraft = () => {
+    if (!pendingDraftRestore) return;
+    editVersionRef.current += 1;
+    unsyncedSinceRef.current = Date.now();
+    setResumeData(pendingDraftRestore.data);
+    setHasUnsavedChanges(true);
+    setAutoSaveError(null);
+    const didWriteScopedDraft = writeStoredResumeDraft(resumeId, pendingDraftRestore.data);
+    setHasCurrentLocalDraft(
+      didWriteScopedDraft ||
+        JSON.stringify(readStoredResumeDraft(resumeId)?.data) ===
+          JSON.stringify(pendingDraftRestore.data)
+    );
+    if (
+      didWriteScopedDraft &&
+      pendingDraftRestore.storageKey !== getResumeDraftStorageKey(resumeId)
+    ) {
+      clearResumeDraftStorageKey(pendingDraftRestore.storageKey);
+    }
+    setPendingDraftRestore(null);
+  };
+
+  const handleRestorePendingDrafts = () => {
+    handleRestoreLocalDraft();
+    handleRestoreAttachmentDraft();
+  };
+
+  const handleKeepServerDraft = () => {
+    if (pendingDraftRestore) {
+      clearResumeDraftStorageKey(pendingDraftRestore.storageKey);
+    } else {
+      clearStoredResumeDraft(resumeId);
+    }
+    setPendingDraftRestore(null);
+    setHasCurrentLocalDraft(false);
+    if (resumeId && pendingAttachmentDraftRestore) {
+      clearAttachmentDraft(resumeId);
+    }
+    setPendingAttachmentDraftRestore(null);
+    setHasCurrentAttachmentDraft(false);
+  };
+
+  const persistAttachmentDraft = (
+    values = attachmentValuesRef.current,
+    baselines = attachmentBaselinesRef.current
+  ) => {
+    if (!resumeId) return;
+    if (
+      values.coverLetter === baselines.coverLetter &&
+      values.outreachMessage === baselines.outreachMessage
+    ) {
+      clearAttachmentDraft(resumeId);
+      setHasCurrentAttachmentDraft(false);
+      return;
+    }
+    const didWrite = writeAttachmentDraft(resumeId, values.coverLetter, values.outreachMessage);
+    const existing = didWrite ? null : readAttachmentDraft(resumeId);
+    setHasCurrentAttachmentDraft(
+      didWrite ||
+        Boolean(
+          existing &&
+          existing.coverLetter === values.coverLetter &&
+          existing.outreachMessage === values.outreachMessage
+        )
+    );
+  };
+
+  const handleCoverLetterChange = (value: string) => {
+    coverLetterEditVersionRef.current += 1;
+    const values = { ...attachmentValuesRef.current, coverLetter: value };
+    attachmentValuesRef.current = values;
+    setCoverLetter(value);
+    setHasUnsavedCoverLetter(value !== attachmentBaselinesRef.current.coverLetter);
+    persistAttachmentDraft(values);
+  };
+
+  const handleOutreachChange = (value: string) => {
+    outreachEditVersionRef.current += 1;
+    const values = { ...attachmentValuesRef.current, outreachMessage: value };
+    attachmentValuesRef.current = values;
+    setOutreachMessage(value);
+    setHasUnsavedOutreach(value !== attachmentBaselinesRef.current.outreachMessage);
+    persistAttachmentDraft(values);
+  };
+
+  const handleRestoreAttachmentDraft = () => {
+    if (!pendingAttachmentDraftRestore) return;
+    const values = {
+      coverLetter: pendingAttachmentDraftRestore.coverLetter,
+      outreachMessage: pendingAttachmentDraftRestore.outreachMessage,
+    };
+    coverLetterEditVersionRef.current += 1;
+    outreachEditVersionRef.current += 1;
+    attachmentValuesRef.current = values;
+    setCoverLetter(values.coverLetter);
+    setOutreachMessage(values.outreachMessage);
+    setHasUnsavedCoverLetter(values.coverLetter !== attachmentBaselinesRef.current.coverLetter);
+    setHasUnsavedOutreach(
+      values.outreachMessage !== attachmentBaselinesRef.current.outreachMessage
+    );
+    persistAttachmentDraft(values);
+    setPendingAttachmentDraftRestore(null);
+  };
+
+  // Agent mode: the parts of the server copy that differ from what this editor
+  // last loaded or saved, i.e. what the user's coding agent changed.
+  const agentChanges = (data: ServerResume) => {
+    const serverResume = isResumeDataShape(data.processed_resume) ? data.processed_resume : null;
+    const coverLetter = data.cover_letter ?? '';
+    const outreachMessage = data.outreach_message ?? '';
+    const baselines = attachmentBaselinesRef.current;
+    return {
+      serverResume,
+      coverLetter,
+      outreachMessage,
+      resume: Boolean(serverResume && !isSameResumeData(serverResume, lastSavedData)),
+      coverLetterChanged: coverLetter !== baselines.coverLetter,
+      outreachChanged: outreachMessage !== baselines.outreachMessage,
+      title: (data.title ?? null) !== resumeTitle,
+    };
+  };
+
+  /**
+   * Show the agent's version of each part it changed, replacing any unsaved
+   * edits to that part. Parts the agent did not change keep the user's edits.
+   */
+  const applyAgentVersion = (data: ServerResume) => {
+    const changes = agentChanges(data);
+    // Invalidates any check that started before this, so it cannot reopen the banner.
+    editVersionRef.current += 1;
+    if (changes.serverResume && changes.resume) {
+      setResumeFormKey((key) => key + 1);
+      setResumeData(changes.serverResume);
+      setLastSavedData(changes.serverResume);
+      setHasUnsavedChanges(false);
+      syncedVersionRef.current = editVersionRef.current;
+      unsyncedSinceRef.current = null;
+      setAutoSaveError(null);
+      clearStoredResumeDraft(resumeId);
+      setHasCurrentLocalDraft(false);
+    }
+    const values = { ...attachmentValuesRef.current };
+    const baselines = { ...attachmentBaselinesRef.current };
+    if (changes.coverLetterChanged) {
+      coverLetterEditVersionRef.current += 1;
+      values.coverLetter = changes.coverLetter;
+      baselines.coverLetter = changes.coverLetter;
+      setCoverLetter(changes.coverLetter);
+      setHasUnsavedCoverLetter(false);
+    }
+    if (changes.outreachChanged) {
+      outreachEditVersionRef.current += 1;
+      values.outreachMessage = changes.outreachMessage;
+      baselines.outreachMessage = changes.outreachMessage;
+      setOutreachMessage(changes.outreachMessage);
+      setHasUnsavedOutreach(false);
+    }
+    attachmentValuesRef.current = values;
+    attachmentBaselinesRef.current = baselines;
+    persistAttachmentDraft(values, baselines);
+    if (changes.title) setResumeTitle(data.title ?? null);
+    setAgentUpdate(null);
+    setAgentAppliedAt(Date.now());
+  };
+
+  const checkForAgentChanges = async () => {
+    if (
+      !resumeId ||
+      loadingState !== 'loaded' ||
+      agentCheckRunningRef.current ||
+      ownWritesRef.current.pending > 0 ||
+      isSaving ||
+      isAutoSaving ||
+      regenerateWizard.step !== 'idle' ||
+      pendingDraftRestore ||
+      pendingAttachmentDraftRestore
+    ) {
+      return;
+    }
+    const before = [
+      ownWritesRef.current.epoch,
+      editVersionRef.current,
+      coverLetterEditVersionRef.current,
+      outreachEditVersionRef.current,
+    ].join();
+    agentCheckRunningRef.current = true;
+    try {
+      const data = await fetchResume(resumeId);
+      const after = [
+        ownWritesRef.current.epoch,
+        editVersionRef.current,
+        coverLetterEditVersionRef.current,
+        outreachEditVersionRef.current,
+      ].join();
+      // An edit or save happened meanwhile: this state no longer matches the server read.
+      if (!documentIsActiveRef.current || ownWritesRef.current.pending > 0 || after !== before) {
+        return;
+      }
+      const changes = agentChanges(data);
+      if (
+        !changes.resume &&
+        !changes.coverLetterChanged &&
+        !changes.outreachChanged &&
+        !changes.title
+      ) {
+        if (agentUpdate) setAgentUpdate(null);
+        return;
+      }
+      if (agentVersionOf(data) === dismissedAgentVersionRef.current) return;
+      const conflict =
+        (changes.resume && hasUnsavedChanges) ||
+        (changes.coverLetterChanged && hasUnsavedCoverLetter) ||
+        (changes.outreachChanged && hasUnsavedOutreach);
+      if (conflict) setAgentUpdate(data);
+      else applyAgentVersion(data);
+    } catch (error) {
+      console.warn('Could not check for agent changes:', error);
+    } finally {
+      agentCheckRunningRef.current = false;
+    }
+  };
+
+  useAgentRefresh(agentMode && loadingState === 'loaded', () => checkForAgentChanges());
+  // The agent can add keywords to this resume's job (set_job_keywords) while the page is open.
+  useAgentRefresh(
+    agentMode && jobContextStatus === 'available' && jobKeywords === null,
+    async () => {
+      if (!resumeId) return;
+      const data = await fetchJobDescription(resumeId);
+      if (data.keywords) {
+        setJobKeywords(data.keywords);
+        setJobCompany(data.company);
+      }
+    }
+  );
+
+  const handleKeepMyEdits = () => {
+    if (!agentUpdate) return;
+    // Autosave resumes and replaces the agent's version with these edits.
+    dismissedAgentVersionRef.current = agentVersionOf(agentUpdate);
+    setAgentUpdate(null);
+  };
+
+  const getCompanyFromTitle = (title: string | null | undefined): string | null => {
+    if (!title) return null;
+    const atIdx = title.lastIndexOf(' @ ');
+    return atIdx !== -1 ? title.substring(atIdx + 3).trim() : null;
+  };
+
+  const handleBackToDashboard = async () => {
+    const resumeDidSave = await flushResumeChanges(true);
+    const attachmentsDidSave = await flushAttachmentChanges();
+    if (resumeDidSave && attachmentsDidSave) {
+      router.push('/dashboard');
+    } else {
+      setShowLeaveWithLocalDraftDialog(true);
+    }
+  };
+
+  const handleLeaveWithLocalDraft = () => {
+    setShowLeaveWithLocalDraftDialog(false);
+    router.push('/dashboard');
+  };
+
+  const handleStartRegenerate = async () => {
+    const didSave = await flushResumeChanges(true);
+    if (didSave) {
+      if (agentMode) setAgentTask('regenerate');
+      else regenerateWizard.startRegenerate();
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!resumeId) {
+      showNotification(t('builder.alerts.downloadNotAvailable'), 'warning');
+      return;
+    }
+    const didSave = await flushResumeChanges(true);
+    if (!didSave) {
+      return;
+    }
+    try {
+      setIsDownloading(true);
+      const blob = await downloadResumePdf(resumeId, templateSettings, uiLanguage);
+      const company = getCompanyFromTitle(resumeTitle);
+      const userName = resumeData.personalInfo?.name?.trim() || null;
+      const filename = buildResumeFilename(userName, company, resumeId, 'resume');
+      downloadBlobAsFile(blob, filename);
+      showNotification(t('builder.alerts.downloadSuccess'), 'success');
+    } catch (error) {
+      console.error('Failed to download resume:', error);
+      if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+        const fallbackUrl = getResumePdfUrl(resumeId, templateSettings, uiLanguage);
+        const didOpen = openUrlInNewTab(fallbackUrl);
+        if (!didOpen) {
+          showNotification(t('common.popupBlocked', { url: fallbackUrl }), 'warning');
+        }
+        return;
+      }
+      let errorMessage = t('builder.alerts.downloadFailed');
+      if (error instanceof Error && error.message) {
+        errorMessage = `${t('builder.alerts.downloadFailed')}: ${error.message}`;
+      }
+      showNotification(errorMessage, 'danger');
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  // Cover letter handlers
+  const queueAttachmentWrite = <T,>(
+    queue: React.RefObject<Promise<void>>,
+    action: () => Promise<T>
+  ): Promise<T> => {
+    const operation = trackOwnWrite(
+      ownWritesRef,
+      queue.current.then(() => {
+        if (!documentIsActiveRef.current) throw new DOMException('Editor closed', 'AbortError');
+        return action();
+      })
+    );
+    queue.current = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  };
+
+  const handleSaveCoverLetter = async (
+    showSuccess = true,
+    showFailure = true
+  ): Promise<boolean> => {
+    if (!resumeId || loadingState !== 'loaded') return false;
+    const activeResumeId = resumeId;
+    try {
+      coverLetterSaveCountRef.current += 1;
+      setIsCoverLetterSaving(true);
+      if (!(await agentAllowsSave('coverLetter', showFailure))) return false;
+      // A prior generation or newer edit can replace the value while this save waits.
+      const { savedContent, savedVersion } = await queueAttachmentWrite(
+        coverLetterSaveQueueRef,
+        async () => {
+          const savedContent = attachmentValuesRef.current.coverLetter;
+          const savedVersion = coverLetterEditVersionRef.current;
+          await updateCoverLetter(activeResumeId, savedContent);
+          return { savedContent, savedVersion };
+        }
+      );
+      if (!documentIsActiveRef.current) return false;
+      const baselines = { ...attachmentBaselinesRef.current, coverLetter: savedContent };
+      attachmentBaselinesRef.current = baselines;
+      const isStillCurrent =
+        savedVersion === coverLetterEditVersionRef.current &&
+        attachmentValuesRef.current.coverLetter === savedContent;
+      setHasUnsavedCoverLetter(!isStillCurrent);
+      persistAttachmentDraft(attachmentValuesRef.current, baselines);
+      if (showSuccess) {
+        showNotification(t('builder.alerts.coverLetterSaveSuccess'), 'success');
+      }
+      return true;
+    } catch (error) {
+      if (!documentIsActiveRef.current) return false;
+      console.error('Failed to save cover letter:', error);
+      persistAttachmentDraft();
+      if (showFailure) {
+        showNotification(t('builder.alerts.coverLetterSaveFailed'), 'danger');
+      }
+      return false;
+    } finally {
+      coverLetterSaveCountRef.current = Math.max(0, coverLetterSaveCountRef.current - 1);
+      if (documentIsActiveRef.current) {
+        setIsCoverLetterSaving(coverLetterSaveCountRef.current > 0);
+      }
+    }
+  };
+
+  const flushCoverLetterForExport = async (showFailure = true): Promise<boolean> => {
+    while (documentIsActiveRef.current) {
+      await coverLetterSaveQueueRef.current;
+      if (!documentIsActiveRef.current) return false;
+      if (attachmentValuesRef.current.coverLetter === attachmentBaselinesRef.current.coverLetter) {
+        return true;
+      }
+      if (!(await handleSaveCoverLetter(false, showFailure))) {
+        return false;
+      }
+    }
+    return false;
+  };
+
+  const flushAttachmentChanges = async (): Promise<boolean> => {
+    while (documentIsActiveRef.current) {
+      if (!(await flushCoverLetterForExport(false))) return false;
+      await outreachSaveQueueRef.current;
+      if (!documentIsActiveRef.current) return false;
+      if (
+        attachmentValuesRef.current.outreachMessage !==
+        attachmentBaselinesRef.current.outreachMessage
+      ) {
+        if (!(await handleSaveOutreach(false, false))) return false;
+        continue;
+      }
+      if (attachmentValuesRef.current.coverLetter === attachmentBaselinesRef.current.coverLetter)
+        return true;
+    }
+    return false;
+  };
+
+  const handleDownloadCoverLetter = async () => {
+    if (!resumeId) {
+      showNotification(t('builder.alerts.coverLetterDownloadRequiresResume'), 'warning');
+      return;
+    }
+    if (!coverLetter) {
+      showNotification(t('builder.alerts.coverLetterMissing'), 'warning');
+      return;
+    }
+    try {
+      setIsDownloading(true);
+      if (!(await flushCoverLetterForExport())) {
+        return;
+      }
+      const blob = await downloadCoverLetterPdf(resumeId, templateSettings.pageSize, uiLanguage);
+      const company = getCompanyFromTitle(resumeTitle);
+      const userName = resumeData.personalInfo?.name?.trim() || null;
+      const filename = buildResumeFilename(userName, company, resumeId, 'cover-letter');
+      downloadBlobAsFile(blob, filename);
+    } catch (error) {
+      console.error('Failed to download cover letter:', error);
+      if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+        const fallbackUrl = getCoverLetterPdfUrl(resumeId, templateSettings.pageSize, uiLanguage);
+        const didOpen = openUrlInNewTab(fallbackUrl);
+        if (!didOpen) {
+          showNotification(t('common.popupBlocked', { url: fallbackUrl }), 'warning');
+        }
+        return;
+      }
+      const errorMessage = error instanceof Error ? error.message : t('common.unknown');
+      showNotification(
+        t('builder.alerts.coverLetterDownloadFailed', { error: errorMessage }),
+        'danger'
+      );
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  // Outreach handlers
+  async function handleSaveOutreach(showSuccess = true, showFailure = true): Promise<boolean> {
+    if (!resumeId || loadingState !== 'loaded') return false;
+    const activeResumeId = resumeId;
+    try {
+      outreachSaveCountRef.current += 1;
+      setIsOutreachSaving(true);
+      if (!(await agentAllowsSave('outreach', showFailure))) return false;
+      const { savedContent, savedVersion } = await queueAttachmentWrite(
+        outreachSaveQueueRef,
+        async () => {
+          const savedContent = attachmentValuesRef.current.outreachMessage;
+          const savedVersion = outreachEditVersionRef.current;
+          await updateOutreachMessage(activeResumeId, savedContent);
+          return { savedContent, savedVersion };
+        }
+      );
+      if (!documentIsActiveRef.current) return false;
+      const baselines = { ...attachmentBaselinesRef.current, outreachMessage: savedContent };
+      attachmentBaselinesRef.current = baselines;
+      const isStillCurrent =
+        savedVersion === outreachEditVersionRef.current &&
+        attachmentValuesRef.current.outreachMessage === savedContent;
+      setHasUnsavedOutreach(!isStillCurrent);
+      persistAttachmentDraft(attachmentValuesRef.current, baselines);
+      if (showSuccess) {
+        showNotification(t('builder.alerts.outreachSaveSuccess'), 'success');
+      }
+      return true;
+    } catch (error) {
+      if (!documentIsActiveRef.current) return false;
+      console.error('Failed to save outreach message:', error);
+      persistAttachmentDraft();
+      if (showFailure) {
+        showNotification(t('builder.alerts.outreachSaveFailed'), 'danger');
+      }
+      return false;
+    } finally {
+      outreachSaveCountRef.current = Math.max(0, outreachSaveCountRef.current - 1);
+      if (documentIsActiveRef.current) setIsOutreachSaving(outreachSaveCountRef.current > 0);
+    }
+  }
+
+  // On-demand generation handlers
+  const doGenerateCoverLetter = async () => {
+    if (!resumeId || loadingState !== 'loaded') return;
+    const activeResumeId = resumeId;
+    const startingEditVersion = coverLetterEditVersionRef.current;
+    setIsGeneratingCoverLetter(true);
+    setShowRegenerateDialog(null);
+    try {
+      const content = await queueAttachmentWrite(coverLetterSaveQueueRef, () =>
+        generateCoverLetter(activeResumeId)
+      );
+      if (!documentIsActiveRef.current) return;
+      attachmentBaselinesRef.current = {
+        ...attachmentBaselinesRef.current,
+        coverLetter: content,
+      };
+      // Generation persisted this baseline, but subsequent user edits retain priority.
+      if (startingEditVersion === coverLetterEditVersionRef.current) {
+        coverLetterEditVersionRef.current += 1;
+        setCoverLetter(content);
+        attachmentValuesRef.current = { ...attachmentValuesRef.current, coverLetter: content };
+      }
+      setHasUnsavedCoverLetter(attachmentValuesRef.current.coverLetter !== content);
+      persistAttachmentDraft();
+    } catch (error) {
+      if (!documentIsActiveRef.current) return;
+      console.error('Failed to generate cover letter:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      showNotification(
+        t('builder.alerts.coverLetterGenerateFailed', { error: errorMessage }),
+        'danger'
+      );
+    } finally {
+      if (documentIsActiveRef.current) setIsGeneratingCoverLetter(false);
+    }
+  };
+
+  const handleGenerateCoverLetter = () => {
+    if (!resumeId || loadingState !== 'loaded') return;
+    if (agentMode) {
+      setAgentTask('coverLetter');
+      return;
+    }
+    // If content exists, show confirmation dialog
+    if (coverLetter) {
+      setShowRegenerateDialog('cover-letter');
+      return;
+    }
+    doGenerateCoverLetter();
+  };
+
+  const doGenerateOutreach = async () => {
+    if (!resumeId || loadingState !== 'loaded') return;
+    const activeResumeId = resumeId;
+    const startingEditVersion = outreachEditVersionRef.current;
+    setIsGeneratingOutreach(true);
+    setShowRegenerateDialog(null);
+    try {
+      const content = await queueAttachmentWrite(outreachSaveQueueRef, () =>
+        generateOutreachMessage(activeResumeId)
+      );
+      if (!documentIsActiveRef.current) return;
+      attachmentBaselinesRef.current = {
+        ...attachmentBaselinesRef.current,
+        outreachMessage: content,
+      };
+      if (startingEditVersion === outreachEditVersionRef.current) {
+        outreachEditVersionRef.current += 1;
+        setOutreachMessage(content);
+        attachmentValuesRef.current = { ...attachmentValuesRef.current, outreachMessage: content };
+      }
+      setHasUnsavedOutreach(attachmentValuesRef.current.outreachMessage !== content);
+      persistAttachmentDraft();
+    } catch (error) {
+      if (!documentIsActiveRef.current) return;
+      console.error('Failed to generate outreach message:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      showNotification(
+        t('builder.alerts.outreachGenerateFailed', { error: errorMessage }),
+        'danger'
+      );
+    } finally {
+      if (documentIsActiveRef.current) setIsGeneratingOutreach(false);
+    }
+  };
+
+  const handleGenerateOutreach = () => {
+    if (!resumeId || loadingState !== 'loaded') return;
+    if (agentMode) {
+      setAgentTask('outreach');
+      return;
+    }
+    // If content exists, show confirmation dialog
+    if (outreachMessage) {
+      setShowRegenerateDialog('outreach');
+      return;
+    }
+    doGenerateOutreach();
+  };
+
+  const canGenerateInterviewPrep =
+    Boolean(resumeId) &&
+    loadingState === 'loaded' &&
+    isTailoredResume &&
+    jobContextStatus === 'available';
+
+  const interviewPrepUnavailableMessage = !resumeId
+    ? t('interviewPrep.saveRequiredDescription')
+    : jobContextStatus === 'loading'
+      ? t('interviewPrep.loadingContextDescription')
+      : jobContextStatus === 'missing'
+        ? t('interviewPrep.missingContextDescription')
+        : null;
+
+  const doGenerateInterviewPrep = async () => {
+    if (!canGenerateInterviewPrep || !resumeId) return;
+    const activeResumeId = resumeId;
+    setIsGeneratingInterviewPrep(true);
+    setInterviewPrepError(null);
+    setShowRegenerateDialog(null);
+    try {
+      const content = await generateInterviewPrep(activeResumeId);
+      if (!documentIsActiveRef.current) return;
+      setInterviewPrep(content);
+    } catch (error) {
+      if (!documentIsActiveRef.current) return;
+      console.error('Failed to generate interview preparation:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      setInterviewPrepError(
+        t('builder.alerts.interviewPrepGenerateFailed', { error: errorMessage })
+      );
+      showNotification(
+        t('builder.alerts.interviewPrepGenerateFailed', { error: errorMessage }),
+        'danger'
+      );
+    } finally {
+      if (documentIsActiveRef.current) setIsGeneratingInterviewPrep(false);
+    }
+  };
+
+  const handleGenerateInterviewPrep = () => {
+    if (!canGenerateInterviewPrep) return;
+    if (agentMode) {
+      setAgentTask('interviewPrep');
+      return;
+    }
+    if (interviewPrep) {
+      setShowRegenerateDialog('interview-prep');
+      return;
+    }
+    doGenerateInterviewPrep();
+  };
+
+  const regenerateDialogContentTitle =
+    showRegenerateDialog === 'cover-letter'
+      ? t('coverLetter.title')
+      : showRegenerateDialog === 'outreach'
+        ? t('outreach.title')
+        : t('interviewPrep.title');
+
+  const regenerateDialogConfirmLabel =
+    showRegenerateDialog === 'cover-letter'
+      ? t('coverLetter.regenerate')
+      : showRegenerateDialog === 'outreach'
+        ? t('outreach.regenerate')
+        : t('interviewPrep.regenerate');
+
+  const handleConfirmRegenerate = () => {
+    if (showRegenerateDialog === 'cover-letter') {
+      doGenerateCoverLetter();
+    } else if (showRegenerateDialog === 'outreach') {
+      doGenerateOutreach();
+    } else if (showRegenerateDialog === 'interview-prep') {
+      doGenerateInterviewPrep();
+    }
+  };
+
+  const resumeSaveStatus = (() => {
+    if (isSaving || isAutoSaving) {
+      return { label: t('builder.autoSave.saving'), tone: 'active' as const };
+    }
+    if (autoSaveError) {
+      return { label: autoSaveError, tone: 'error' as const };
+    }
+    if (formattingSaveFailed) {
+      return { label: t('builder.alerts.formattingSaveFailed'), tone: 'error' as const };
+    }
+    if (hasUnsavedChanges) {
+      return hasCurrentLocalDraft
+        ? { label: t('builder.autoSave.localDraft'), tone: 'warning' as const }
+        : { label: t('builder.autoSave.localDraftUnavailable'), tone: 'error' as const };
+    }
+    if (agentAppliedAt && agentAppliedAt > (lastAutoSavedAt ?? 0)) {
+      return { label: t('builder.agentUpdate.applied'), tone: 'ready' as const };
+    }
+    if (resumeId && lastAutoSavedAt) {
+      return { label: t('builder.autoSave.saved'), tone: 'ready' as const };
+    }
+    return null;
+  })();
+
+  const nothingYet = <EmptyState className="px-6" title={t('builder.panels.nothingYet')} />;
+
+  return (
+    <div className="h-screen w-full bg-canvas flex justify-center items-center p-2 md:p-4">
+      {/* Main Container */}
+      <div className="w-full h-full border border-ink bg-canvas shadow-sw-lg flex flex-col">
+        {/* Header: one compact toolbar row (owner F2, builder only) */}
+        <PageHeader className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-6 py-3 md:px-6 md:py-3 no-print">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+            <Button variant="outline" size="sm" onClick={handleBackToDashboard}>
+              <ArrowLeft aria-hidden="true" />
+              {t('nav.backToDashboard')}
+            </Button>
+            <PageHeader.Title className="text-2xl leading-tight md:text-3xl">
+              {t('nav.builder')}
+            </PageHeader.Title>
+            <p className="font-mono text-xs font-bold uppercase tracking-wide text-steel">
+              {'// '}
+              {resumeId ? t('builder.editMode') : t('builder.createAndPreview')}
+            </p>
+            <span role="status">
+              {resumeSaveStatus && (
+                <StatusIndicator tone={resumeSaveStatus.tone} live={false}>
+                  {resumeSaveStatus.label}
+                </StatusIndicator>
+              )}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Community links: quiet ghost actions, left of the tab's own actions */}
+            <CommunityLinks variant="builder" />
+
+            {/* Resume tab actions */}
+            {activeTab === 'resume' && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleStartRegenerate}
+                  disabled={!resumeId || isSaving}
+                >
+                  {t('builder.regenerate.buttonLabel')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleReset}
+                  disabled={!hasUnsavedChanges}
+                >
+                  <ArrowCounterClockwise aria-hidden="true" />
+                  {t('common.reset')}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={!resumeId || isSaving || loadingState !== 'loaded'}
+                >
+                  <FloppyDisk aria-hidden="true" />
+                  {isSaving
+                    ? t('common.saving')
+                    : autoSaveError
+                      ? t('builder.autoSave.retrySave')
+                      : hasUnsavedChanges
+                        ? t('builder.autoSave.saveNow')
+                        : t('builder.autoSave.savedButton')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDownload}
+                  disabled={!resumeId || isDownloading}
+                >
+                  <DownloadSimple aria-hidden="true" />
+                  {isDownloading ? t('common.generating') : t('common.download')}
+                </Button>
+              </>
+            )}
+
+            {/* Cover letter tab actions */}
+            {activeTab === 'cover-letter' && coverLetter && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleGenerateCoverLetter}
+                  disabled={isGeneratingCoverLetter}
+                >
+                  {isGeneratingCoverLetter && (
+                    <SpinnerGap aria-hidden="true" className="animate-spin" />
+                  )}
+                  {t('coverLetter.regenerate')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDownloadCoverLetter}
+                  disabled={!resumeId || isDownloading}
+                >
+                  <DownloadSimple aria-hidden="true" />
+                  {isDownloading ? t('common.generating') : t('common.download')}
+                </Button>
+              </>
+            )}
+
+            {/* Outreach tab actions (Copy lives in the editor) */}
+            {activeTab === 'outreach' && outreachMessage && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGenerateOutreach}
+                disabled={isGeneratingOutreach}
+              >
+                {isGeneratingOutreach && <SpinnerGap aria-hidden="true" className="animate-spin" />}
+                {t('outreach.regenerate')}
+              </Button>
+            )}
+
+            {/* Interview prep tab actions */}
+            {activeTab === 'interview-prep' && interviewPrep && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGenerateInterviewPrep}
+                disabled={!canGenerateInterviewPrep || isGeneratingInterviewPrep}
+              >
+                {isGeneratingInterviewPrep && (
+                  <SpinnerGap aria-hidden="true" className="animate-spin" />
+                )}
+                {t('interviewPrep.regenerate')}
+              </Button>
+            )}
+          </div>
+        </PageHeader>
+
+        {/* Agent mode: the agent saved a part the user is also editing. */}
+        {agentUpdate && (
+          <div className="border-b border-ink px-6 py-3 no-print">
+            <Alert tone="warning" title={t('builder.agentUpdate.conflictTitle')}>
+              <p>{t('builder.agentUpdate.conflictBody')}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" onClick={() => applyAgentVersion(agentUpdate)}>
+                  {t('builder.agentUpdate.useAgent')}
+                </Button>
+                <Button size="sm" variant="outline" onClick={handleKeepMyEdits}>
+                  {t('builder.agentUpdate.keepMine')}
+                </Button>
+              </div>
+            </Alert>
+          </div>
+        )}
+
+        {/* Content Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 bg-ink gap-px flex-1 min-h-0">
+          {/* Left Panel: editor and generate controls */}
+          <div className="bg-canvas p-3 md:p-4 overflow-y-auto no-print">
+            <div className="max-w-3xl space-y-6">
+              <PanelHeader
+                tone="input"
+                title={
+                  activeTab === 'resume'
+                    ? t('builder.leftPanel.editorPanel')
+                    : activeTab === 'cover-letter'
+                      ? t('builder.leftPanel.coverLetterEditor')
+                      : activeTab === 'outreach'
+                        ? t('builder.leftPanel.outreachEditor')
+                        : activeTab === 'interview-prep'
+                          ? t('builder.leftPanel.interviewPrep')
+                          : activeTab === 'jd-match'
+                            ? t('builder.leftPanel.jdMatchAnalysis')
+                            : activeTab === 'writing'
+                              ? t('builder.leftPanel.writing')
+                              : t('builder.leftPanel.atsCheck')
+                }
+              />
+
+              {/* Resume Editor */}
+              {activeTab === 'resume' &&
+                (loadingState === 'error' ? (
+                  <Alert tone="error">{t('builder.alerts.loadFailed')}</Alert>
+                ) : (
+                  <>
+                    <FormattingControls
+                      settings={templateSettings}
+                      onChange={handleSettingsChange}
+                    />
+                    <ResumeForm
+                      key={resumeFormKey}
+                      resumeData={resumeData}
+                      onUpdate={handleUpdate}
+                    />
+                  </>
+                ))}
+
+              {/* Cover Letter Editor */}
+              {activeTab === 'cover-letter' &&
+                (coverLetter ? (
+                  <CoverLetterEditor
+                    content={coverLetter}
+                    onChange={handleCoverLetterChange}
+                    onSave={handleSaveCoverLetter}
+                    isSaving={isCoverLetterSaving}
+                  />
+                ) : (
+                  <GeneratePrompt
+                    type="cover-letter"
+                    isGenerating={isGeneratingCoverLetter}
+                    onGenerate={handleGenerateCoverLetter}
+                    isTailoredResume={isTailoredResume}
+                  />
+                ))}
+
+              {/* Outreach Editor */}
+              {activeTab === 'outreach' &&
+                (outreachMessage ? (
+                  <OutreachEditor
+                    content={outreachMessage}
+                    onChange={handleOutreachChange}
+                    onSave={handleSaveOutreach}
+                    isSaving={isOutreachSaving}
+                  />
+                ) : (
+                  <GeneratePrompt
+                    type="outreach"
+                    isGenerating={isGeneratingOutreach}
+                    onGenerate={handleGenerateOutreach}
+                    isTailoredResume={isTailoredResume}
+                  />
+                ))}
+
+              {/* Interview Prep: generate controls here, the output renders on the right */}
+              {activeTab === 'interview-prep' &&
+                (interviewPrep ? (
+                  <p className="max-w-[60ch] text-sm text-ink-soft text-pretty">
+                    {t('builder.generatePrompt.interviewPrepFooter')}
+                  </p>
+                ) : (
+                  <InterviewPrepView
+                    interviewPrep={null}
+                    isGenerating={isGeneratingInterviewPrep}
+                    error={interviewPrepError}
+                    onGenerate={handleGenerateInterviewPrep}
+                    isTailoredResume={isTailoredResume}
+                    canGenerate={canGenerateInterviewPrep}
+                    unavailableMessage={interviewPrepUnavailableMessage}
+                  />
+                ))}
+
+              {/* JD Match Info Panel */}
+              {activeTab === 'jd-match' && (
+                <div className="space-y-4">
+                  {resumeId && jobContextStatus === 'available' && (
+                    <AtsScorePanel
+                      key={resumeId}
+                      resumeId={resumeId}
+                      hasUnsavedChanges={hasUnsavedChanges}
+                      hasJobKeywords={jobKeywords !== null}
+                      template={templateSettings.template}
+                    />
+                  )}
+
+                  <div className="border-2 border-ink bg-white p-4">
+                    <h3 className="font-mono text-sm font-bold uppercase mb-2">
+                      {t('builder.jdMatch.aboutTitle')}
+                    </h3>
+                    <p className="text-sm text-ink-soft leading-relaxed">
+                      {t('builder.jdMatch.aboutDescription')}
+                    </p>
+                  </div>
+
+                  <div className="border-2 border-ink bg-canvas p-4">
+                    <h3 className="font-mono text-sm font-bold uppercase mb-2">
+                      {t('builder.jdMatch.highlightedKeywordsTitle')}
+                    </h3>
+                    <p className="text-sm text-ink-soft leading-relaxed">
+                      {(() => {
+                        const template = t(
+                          'builder.jdMatch.highlightedKeywordsDescriptionTemplate'
+                        );
+                        const parts = template.split('__COLOR__');
+                        if (parts.length < 2) return template;
+                        return (
+                          <>
+                            {parts[0]}
+                            <mark className="bg-highlight px-1">
+                              {t('builder.jdMatch.highlightColor')}
+                            </mark>
+                            {parts.slice(1).join('__COLOR__')}
+                          </>
+                        );
+                      })()}
+                    </p>
+                    {jobForcedKeywords.length > 0 && (
+                      <p className="mt-2 text-sm text-ink-soft leading-relaxed">
+                        <mark className="bg-primary px-1 text-white">
+                          {t('builder.jdMatch.forcedColor')}
+                        </mark>{' '}
+                        {t('builder.jdMatch.forcedLegend')}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="border-2 border-ink bg-white p-4">
+                    <h3 className="font-mono text-sm font-bold uppercase mb-2">
+                      {t('builder.jdMatch.tipsTitle')}
+                    </h3>
+                    <ul className="text-sm text-ink-soft space-y-1 list-disc list-inside">
+                      <li>{t('builder.jdMatch.tips.items.addMissingKeywords')}</li>
+                      <li>{t('builder.jdMatch.tips.items.focusTechnicalSkills')}</li>
+                      <li>{t('builder.jdMatch.tips.items.matchActionVerbs')}</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+
+              {/* Writing: score, Improve writing and its review */}
+              {activeTab === 'writing' && (
+                <WritingPanel
+                  resumeData={resumeData}
+                  onApply={(data) => {
+                    handleUpdate(data);
+                    setResumeFormKey((key) => key + 1);
+                  }}
+                  agentMode={agentMode}
+                  onAgentPrompt={() => setAgentTask('improveWriting')}
+                />
+              )}
+
+              {/* ATS Check Info Panel */}
+              {activeTab === 'ats-check' && (
+                <div className="space-y-4">
+                  <div className="border-2 border-ink bg-white p-4">
+                    <h3 className="font-mono text-sm font-bold uppercase mb-2">
+                      {t('builder.atsCheck.aboutTitle')}
+                    </h3>
+                    <p className="text-sm text-ink-soft leading-relaxed">
+                      {t('builder.atsCheck.aboutDescription')}
+                    </p>
+                  </div>
+                  <div className="border-2 border-ink bg-canvas p-4">
+                    <h3 className="font-mono text-sm font-bold uppercase mb-2">
+                      {t('builder.atsCheck.roundTripTitle')}
+                    </h3>
+                    <p className="text-sm text-ink-soft leading-relaxed">
+                      {t('builder.atsCheck.roundTripDescription')}
+                    </p>
+                  </div>
+                  <div className="border-2 border-ink bg-white p-4">
+                    <h3 className="font-mono text-sm font-bold uppercase mb-2">
+                      {t('builder.atsCheck.tipsTitle')}
+                    </h3>
+                    <ul className="text-sm text-ink-soft space-y-1 list-disc list-inside">
+                      <li>{t('builder.atsCheck.tips.items.singleColumn')}</li>
+                      <li>{t('builder.atsCheck.tips.items.standardHeadings')}</li>
+                      <li>{t('builder.atsCheck.tips.items.contactInBody')}</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Panel: output only */}
+          <div className="bg-panel overflow-hidden flex flex-col no-print">
+            {/* Panel caption and tabs */}
+            <div className="px-3 pt-3 md:px-4 shrink-0 bg-panel">
+              <PanelHeader
+                tone="output"
+                title={t('builder.panels.preview')}
+                titleId="builder-preview-heading"
+              />
+              <RetroTabs
+                idPrefix="builder"
+                aria-labelledby="builder-preview-heading"
+                tabs={[
+                  { id: 'resume', label: t('builder.previewTabs.resume') },
+                  {
+                    id: 'cover-letter',
+                    label: t('builder.previewTabs.coverLetter'),
+                    disabled: !coverLetter,
+                  },
+                  {
+                    id: 'outreach',
+                    label: t('builder.previewTabs.outreach'),
+                    disabled: !outreachMessage,
+                  },
+                  {
+                    id: 'interview-prep',
+                    label: t('builder.previewTabs.interviewPrep'),
+                    disabled: !isTailoredResume,
+                  },
+                  {
+                    id: 'jd-match',
+                    label: t('builder.previewTabs.jdMatch'),
+                    disabled: !jobDescription,
+                  },
+                  {
+                    id: 'ats-check',
+                    label: t('builder.previewTabs.atsCheck'),
+                    disabled: !resumeId,
+                  },
+                  { id: 'writing', label: t('builder.previewTabs.writing') },
+                ]}
+                activeTab={activeTab}
+                onTabChange={(id) => setActiveTab(id as TabId)}
+              />
+            </div>
+
+            {/* Preview Content: the active tab's panel */}
+            <div
+              id={`builder-panel-${activeTab}`}
+              role="tabpanel"
+              aria-labelledby={`builder-tab-${activeTab}`}
+              className="flex-1 overflow-y-auto"
+            >
+              {/* Resume Preview (the Writing tab shows the resume it edits) */}
+              {(activeTab === 'resume' || activeTab === 'writing') && (
+                <PaginatedPreview
+                  resumeData={localizedResumeDataForPreview}
+                  settings={templateSettings}
+                />
+              )}
+
+              {/* Cover Letter Preview */}
+              {activeTab === 'cover-letter' &&
+                (coverLetter && resumeData.personalInfo ? (
+                  <div className="p-6">
+                    <CoverLetterPreview
+                      content={coverLetter}
+                      personalInfo={resumeData.personalInfo}
+                      pageSize={templateSettings.pageSize}
+                    />
+                  </div>
+                ) : (
+                  nothingYet
+                ))}
+
+              {/* Outreach Preview */}
+              {activeTab === 'outreach' &&
+                (outreachMessage ? (
+                  <div className="p-6">
+                    <OutreachPreview content={outreachMessage} />
+                  </div>
+                ) : (
+                  nothingYet
+                ))}
+
+              {/* Interview Prep Output */}
+              {activeTab === 'interview-prep' &&
+                (interviewPrep ? (
+                  <InterviewPrepView
+                    interviewPrep={interviewPrep}
+                    isGenerating={isGeneratingInterviewPrep}
+                    error={interviewPrepError}
+                    onGenerate={handleGenerateInterviewPrep}
+                    isTailoredResume={isTailoredResume}
+                    canGenerate={canGenerateInterviewPrep}
+                    unavailableMessage={interviewPrepUnavailableMessage}
+                  />
+                ) : (
+                  nothingYet
+                ))}
+
+              {/* JD Match Comparison */}
+              {activeTab === 'jd-match' && jobDescription && (
+                <JDComparisonView
+                  jobDescription={jobDescription}
+                  resumeData={resumeData}
+                  jobKeywords={jobKeywords}
+                  company={jobCompany}
+                  forcedKeywords={jobForcedKeywords}
+                />
+              )}
+
+              {/* ATS Parse Check */}
+              {activeTab === 'ats-check' && (
+                <AtsCheckView
+                  resumeId={resumeId}
+                  settings={templateSettings}
+                  locale={uiLanguage}
+                  hasUnsavedChanges={hasUnsavedChanges}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {agentMode && (
+        <AgentPromptDialog
+          task={agentTask}
+          resumeId={resumeId ?? ''}
+          onClose={() => setAgentTask(null)}
+        />
+      )}
+
+      {/* Regenerate Confirmation Dialog */}
+      <ConfirmDialog
+        open={showRegenerateDialog !== null}
+        onOpenChange={(open) => !open && setShowRegenerateDialog(null)}
+        title={t('builder.regenerateDialog.title', {
+          title: regenerateDialogContentTitle,
+        })}
+        description={t('builder.regenerateDialog.description', {
+          title: regenerateDialogContentTitle,
+        })}
+        confirmLabel={regenerateDialogConfirmLabel}
+        cancelLabel={t('common.cancel')}
+        variant="warning"
+        onConfirm={handleConfirmRegenerate}
+      />
+
+      {/* Local Draft Recovery Dialog */}
+      <ConfirmDialog
+        open={pendingDraftRestore !== null || pendingAttachmentDraftRestore !== null}
+        onOpenChange={() => undefined}
+        dismissible={false}
+        title={t('builder.draftRecovery.title')}
+        description={t(
+          resumeId ? 'builder.draftRecovery.description' : 'builder.draftRecovery.newDescription'
+        )}
+        confirmLabel={t('builder.draftRecovery.restoreDraft')}
+        cancelLabel={t(resumeId ? 'builder.draftRecovery.useServer' : 'builder.discardChanges')}
+        variant="warning"
+        closeOnConfirm={false}
+        onConfirm={handleRestorePendingDrafts}
+        onCancel={handleKeepServerDraft}
+      />
+
+      {/* Leave With Local Draft Dialog */}
+      <ConfirmDialog
+        open={showLeaveWithLocalDraftDialog}
+        onOpenChange={setShowLeaveWithLocalDraftDialog}
+        title={t(
+          hasCurrentRecoveryDraft
+            ? 'builder.leaveWithLocalDraft.title'
+            : 'builder.leaveWithoutDraft.title'
+        )}
+        description={t(
+          hasCurrentRecoveryDraft
+            ? 'builder.leaveWithLocalDraft.description'
+            : 'builder.leaveWithoutDraft.description'
+        )}
+        confirmLabel={t(
+          hasCurrentRecoveryDraft
+            ? 'builder.leaveWithLocalDraft.leave'
+            : 'builder.leaveWithoutDraft.leave'
+        )}
+        cancelLabel={t(
+          hasCurrentRecoveryDraft
+            ? 'builder.leaveWithLocalDraft.stay'
+            : 'builder.leaveWithoutDraft.stay'
+        )}
+        variant="warning"
+        onConfirm={handleLeaveWithLocalDraft}
+      />
+
+      {/* Notification Dialog (replaces native alert()) */}
+      <ConfirmDialog
+        open={notificationDialog !== null}
+        onOpenChange={(open) => !open && setNotificationDialog(null)}
+        title={notificationDialog?.title ?? ''}
+        description={notificationDialog?.description ?? ''}
+        confirmLabel={t('common.ok')}
+        showCancelButton={false}
+        variant={notificationDialog?.variant ?? 'default'}
+        onConfirm={() => setNotificationDialog(null)}
+      />
+
+      {/* AI Regenerate Wizard */}
+      <RegenerateWizard
+        step={regenerateWizard.step}
+        onStepChange={regenerateWizard.setStep}
+        experienceItems={experienceItemsForRegenerate}
+        projectItems={projectItemsForRegenerate}
+        skillsItem={skillsItemForRegenerate}
+        selectedItems={regenerateWizard.selectedItems}
+        onSelectionChange={regenerateWizard.setSelectedItems}
+        instruction={regenerateWizard.instruction}
+        onInstructionChange={regenerateWizard.setInstruction}
+        regeneratedItems={regenerateWizard.regeneratedItems}
+        regenerateErrors={regenerateWizard.regenerateErrors}
+        isGenerating={regenerateWizard.isGenerating}
+        isApplying={regenerateWizard.isApplying}
+        needsRefresh={regenerateWizard.needsRefresh}
+        error={regenerateWizard.error}
+        onGenerate={regenerateWizard.generate}
+        onAccept={regenerateWizard.acceptChanges}
+        onReject={regenerateWizard.rejectAndRegenerate}
+        onClose={regenerateWizard.reset}
+      />
+    </div>
+  );
+};
+
+const ResumeBuilderDocument = ({ agentMode }: ResumeBuilderProps) => {
+  const searchParams = useSearchParams();
+  // Query-only navigation can retain this page. Remount the editor at the
+  // document boundary so every baseline, queue and draft belongs to one ID.
+  return <ResumeBuilderContent key={searchParams.get('id') ?? 'new'} agentMode={agentMode} />;
+};
+
+export const ResumeBuilder = ({ agentMode }: ResumeBuilderProps) => {
+  const { t } = useTranslations();
+  return (
+    <Suspense fallback={<div>{t('common.loading')}</div>}>
+      <ResumeBuilderDocument agentMode={agentMode} />
+    </Suspense>
+  );
+};

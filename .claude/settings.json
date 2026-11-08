@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker-compose ps:*)",
+      "Bash(docker-compose logs:*)",
+      "Bash(grep:*)",
+      "Bash(uv run python:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run build:*)",
+      "Bash(cd:*)",
+      "Bash(npx tsc:*)",
+      "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\")",
+      "Bash(wc:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(npm run format:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh issue view:*)",
+      "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\")",
+      "Bash(node:*)",
+      "Bash(npm --version)",
+      "Bash(source:*)",
+      "Bash(npm info *)",
+      "Bash(claude plugin *)",
+      "Bash(gh search *)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl -s \"https://api.github.com/search/repositories?q=ponytail+claude-plugin&sort=stars\")",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(item['full_name'], '-', item.get\\('description',''\\)\\) for item in data['items']]\")",
+      "Bash(curl -s \"https://api.github.com/search/repositories?q=graphify+claude&sort=stars\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); j.items.forEach\\(i=>console.log\\(i.full_name,'-',i.description||''\\)\\)\")",
+      "Bash(curl -s \"https://api.github.com/repos/Mogystl/ponytail-claude-plugin/contents/.claude\")",
+      "Bash(curl -v --max-time 10 https://api.anthropic.com)",
+      "Bash(uv run python -c ' *)"
+    ]
+  }
+}

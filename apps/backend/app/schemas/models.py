@@ -1,0 +1,1199 @@
+"""Pydantic models matching frontend expectations."""
+
+import copy
+import re
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.ai_limits import validate_source_size
+from app.config import normalize_provider
+from app.schemas.refinement import RefinementStats
+from app.schemas.writing_report import KeywordPlacement, WritingReport
+
+_TEXT_VALUE_KEYS = (
+    "text",
+    "summary",
+    "description",
+    "value",
+    "content",
+    "title",
+    "subtitle",
+    "name",
+    "label",
+)
+_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)])\s*")
+
+
+def _extract_text_fragments(
+    value: Any, depth: int = 0, max_depth: int = 10
+) -> list[str]:
+    """Extract text-like content from nested list/dict values."""
+    if depth >= max_depth or value is None:
+        return []
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+
+    if isinstance(value, (int, float)):
+        return [str(value)]
+
+    if isinstance(value, list):
+        fragments: list[str] = []
+        for item in value:
+            fragments.extend(_extract_text_fragments(item, depth + 1, max_depth))
+        return fragments
+
+    if isinstance(value, dict):
+        fragments: list[str] = []
+
+        for key in _TEXT_VALUE_KEYS:
+            if key in value:
+                fragments.extend(
+                    _extract_text_fragments(value.get(key), depth + 1, max_depth)
+                )
+
+        if fragments:
+            return fragments
+
+        for nested in value.values():
+            fragments.extend(_extract_text_fragments(nested, depth + 1, max_depth))
+        return fragments
+
+    return []
+
+
+def _coerce_text(value: Any, joiner: str = " ") -> str:
+    """Coerce nested values into a single text string."""
+    return joiner.join(_extract_text_fragments(value)).strip()
+
+
+def _coerce_optional_text(value: Any) -> str | None:
+    """Coerce nested values into optional text."""
+    if value is None:
+        return None
+    text = _coerce_text(value)
+    return text or None
+
+
+def _split_description_lines(value: str) -> list[str]:
+    """Split a description block into clean bullet lines."""
+    items: list[str] = []
+    for raw_line in re.split(r"\r?\n+", value):
+        line = _BULLET_PREFIX_RE.sub("", raw_line.strip())
+        if line:
+            items.append(line)
+    return items
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    """Coerce nested/string values into a list of strings."""
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        return _split_description_lines(value)
+
+    if isinstance(value, list):
+        items: list[str] = []
+        for entry in value:
+            if isinstance(entry, str):
+                items.extend(_split_description_lines(entry))
+                continue
+
+            coerced = _coerce_text(entry)
+            if coerced:
+                items.append(coerced)
+        return items
+
+    coerced = _coerce_text(value)
+    return [coerced] if coerced else []
+
+
+def _coerce_description_styles(value: Any) -> list[Literal["bullet", "plain"]]:
+    """Coerce description style values — all rows are bullets."""
+    if not isinstance(value, list):
+        return []
+
+    return ["bullet" for _ in value]
+
+
+def _align_description_styles(
+    description: list[str],
+    description_styles: list[Literal["bullet", "plain"]],
+) -> list[Literal["bullet", "plain"]]:
+    """Keep descriptionStyles aligned with description rows."""
+    return [
+        description_styles[index] if index < len(description_styles) else "bullet"
+        for index, _ in enumerate(description)
+    ]
+
+
+# Section Type Enum for dynamic sections
+class SectionType(str, Enum):
+    """Types of resume sections."""
+
+    PERSONAL_INFO = "personalInfo"  # Special: always first, not reorderable
+    TEXT = "text"  # Single text block (like summary)
+    ITEM_LIST = "itemList"  # Array of items with fields (like experience)
+    STRING_LIST = "stringList"  # Array of strings (like skills)
+
+
+# Resume Data Models (matching frontend types in resume-component.tsx)
+class PersonalInfo(BaseModel):
+    """Personal information section."""
+
+    name: str = ""
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    location: str = ""
+    website: str | None = None
+    linkedin: str | None = None
+    github: str | None = None
+
+
+class Experience(BaseModel):
+    """Work experience entry."""
+
+    id: int = 0
+    title: str = ""
+    company: str = ""
+    location: str | None = None
+    years: str = ""
+    description: list[str] = Field(default_factory=list)
+    descriptionStyles: list[Literal["bullet", "plain"]] = Field(default_factory=list)
+    # Renders as one "Title, Company, years" line under "Earlier experience"; the
+    # description and location stay stored but are not shown.
+    condensed: bool = False
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _normalize_description(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
+    @field_validator("descriptionStyles", mode="before")
+    @classmethod
+    def _normalize_description_styles(
+        cls, value: Any
+    ) -> list[Literal["bullet", "plain"]]:
+        return _coerce_description_styles(value)
+
+    @field_validator("condensed", mode="before")
+    @classmethod
+    def _normalize_condensed(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() == "true"
+
+    @model_validator(mode="after")
+    def _sync_description_styles(self) -> "Experience":
+        self.descriptionStyles = _align_description_styles(
+            self.description, self.descriptionStyles
+        )
+        return self
+
+
+class Education(BaseModel):
+    """Education entry."""
+
+    id: int = 0
+    institution: str = ""
+    degree: str = ""
+    years: str = ""
+    description: str | None = None
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _normalize_description(cls, value: Any) -> str | None:
+        return _coerce_optional_text(value)
+
+
+class Project(BaseModel):
+    """Personal project entry."""
+
+    id: int = 0
+    name: str = ""
+    role: str = ""
+    years: str = ""
+    github: str | None = None
+    website: str | None = None
+    description: list[str] = Field(default_factory=list)
+    descriptionStyles: list[Literal["bullet", "plain"]] = Field(default_factory=list)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _normalize_description(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
+    @field_validator("descriptionStyles", mode="before")
+    @classmethod
+    def _normalize_description_styles(
+        cls, value: Any
+    ) -> list[Literal["bullet", "plain"]]:
+        return _coerce_description_styles(value)
+
+    @model_validator(mode="after")
+    def _sync_description_styles(self) -> "Project":
+        self.descriptionStyles = _align_description_styles(
+            self.description, self.descriptionStyles
+        )
+        return self
+
+
+class AdditionalInfo(BaseModel):
+    """Additional information section."""
+
+    technicalSkills: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    certificationsTraining: list[str] = Field(default_factory=list)
+    awards: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "technicalSkills",
+        "languages",
+        "certificationsTraining",
+        "awards",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_string_fields(cls, value: Any) -> list[str]:
+        items = _coerce_string_list(value)
+        # Deduplicate case-insensitively, preserving first-seen order.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for item in items:
+            key = item.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append(item.strip())
+        return deduped
+
+
+# Section Metadata Models for dynamic section management
+class SectionMeta(BaseModel):
+    """Metadata for a resume section."""
+
+    id: str  # Unique identifier (e.g., "summary", "custom_1")
+    key: str  # Data key (matches ResumeData field or customSections key)
+    displayName: str  # User-visible name
+    sectionType: SectionType  # Type of section
+    isDefault: bool = True  # True for built-in sections
+    isVisible: bool = True  # Whether to show in resume
+    order: int = 0  # Display order (0 = first after personalInfo)
+
+
+class CustomSectionItem(BaseModel):
+    """Generic item for custom item-based sections."""
+
+    id: int = 0
+    title: str = ""  # Primary title
+    subtitle: str | None = None  # Secondary info (company, institution, etc.)
+    location: str | None = None
+    years: str = ""
+    description: list[str] = Field(default_factory=list)
+    descriptionStyles: list[Literal["bullet", "plain"]] = Field(default_factory=list)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _normalize_description(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
+    @field_validator("descriptionStyles", mode="before")
+    @classmethod
+    def _normalize_description_styles(
+        cls, value: Any
+    ) -> list[Literal["bullet", "plain"]]:
+        return _coerce_description_styles(value)
+
+    @model_validator(mode="after")
+    def _sync_description_styles(self) -> "CustomSectionItem":
+        self.descriptionStyles = _align_description_styles(
+            self.description, self.descriptionStyles
+        )
+        return self
+
+
+class CustomSection(BaseModel):
+    """Custom section data container."""
+
+    sectionType: SectionType
+    items: list[CustomSectionItem] | None = None  # For ITEM_LIST
+    strings: list[str] | None = None  # For STRING_LIST
+    text: str | None = None  # For TEXT
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def _normalize_items(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            return value
+        result = []
+        for i, item in enumerate(value):
+            if isinstance(item, str):
+                result.append({"id": i + 1, "title": item})
+            else:
+                result.append(item)
+        return result
+
+    @field_validator("strings", mode="before")
+    @classmethod
+    def _normalize_strings(cls, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        return _coerce_string_list(value)
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: Any) -> str | None:
+        return _coerce_optional_text(value)
+
+
+# Default section metadata for backward compatibility
+DEFAULT_SECTION_META: list[dict[str, Any]] = [
+    {
+        "id": "personalInfo",
+        "key": "personalInfo",
+        "displayName": "Personal Info",
+        "sectionType": SectionType.PERSONAL_INFO,
+        "isDefault": True,
+        "isVisible": True,
+        "order": 0,
+    },
+    {
+        "id": "summary",
+        "key": "summary",
+        "displayName": "Summary",
+        "sectionType": SectionType.TEXT,
+        "isDefault": True,
+        "isVisible": True,
+        "order": 1,
+    },
+    {
+        "id": "workExperience",
+        "key": "workExperience",
+        "displayName": "Experience",
+        "sectionType": SectionType.ITEM_LIST,
+        "isDefault": True,
+        "isVisible": True,
+        "order": 2,
+    },
+    {
+        "id": "education",
+        "key": "education",
+        "displayName": "Education",
+        "sectionType": SectionType.ITEM_LIST,
+        "isDefault": True,
+        "isVisible": True,
+        "order": 3,
+    },
+    {
+        "id": "personalProjects",
+        "key": "personalProjects",
+        "displayName": "Projects",
+        "sectionType": SectionType.ITEM_LIST,
+        "isDefault": True,
+        "isVisible": True,
+        "order": 4,
+    },
+    {
+        "id": "additional",
+        "key": "additional",
+        "displayName": "Skills & Awards",
+        "sectionType": SectionType.STRING_LIST,
+        "isDefault": True,
+        "isVisible": True,
+        "order": 5,
+    },
+]
+
+
+def normalize_resume_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Ensure resume data has section metadata (migration helper).
+
+    This function is used for lazy migration of existing resumes
+    that don't have sectionMeta or customSections fields.
+    """
+    if not data.get("sectionMeta"):
+        # Use deepcopy to avoid shared mutable reference bug
+        # Without this, all resumes would share the same list reference
+        data["sectionMeta"] = copy.deepcopy(DEFAULT_SECTION_META)
+    if "customSections" not in data:
+        data["customSections"] = {}
+    return data
+
+
+class ResumeData(BaseModel):
+    """Complete structured resume data."""
+
+    # Existing fields (kept for backward compatibility)
+    personalInfo: PersonalInfo = Field(default_factory=PersonalInfo)
+    summary: str = ""
+    workExperience: list[Experience] = Field(default_factory=list)
+    education: list[Education] = Field(default_factory=list)
+    personalProjects: list[Project] = Field(default_factory=list)
+    additional: AdditionalInfo = Field(default_factory=AdditionalInfo)
+
+    # NEW: Section metadata and custom sections
+    sectionMeta: list[SectionMeta] = Field(default_factory=list)
+    customSections: dict[str, CustomSection] = Field(default_factory=dict)
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _normalize_summary(cls, value: Any) -> str:
+        return _coerce_text(value)
+
+
+# API Response Models
+class ResumeUploadResponse(BaseModel):
+    """Response for resume upload."""
+
+    message: str
+    request_id: str
+    resume_id: str
+    processing_status: Literal["pending", "processing", "ready", "failed"] = "pending"
+    is_master: bool = False
+    is_default_master: bool = False
+
+
+class RawResume(BaseModel):
+    """Raw resume data from database."""
+
+    id: int | None = None
+    content: str
+    content_type: str = "md"
+    created_at: str
+    processing_status: str = "pending"  # pending, processing, ready, failed
+
+
+class InterviewPrepQuestion(BaseModel):
+    """Interview question grounded in the tailored resume and job context."""
+
+    question: str
+    focus_area: str | None = None
+    suggested_answer_points: list[str] = Field(default_factory=list)
+
+
+class InterviewPrepSkillGap(BaseModel):
+    """A preparation target, not a claimed candidate skill."""
+
+    skill: str
+    why_it_matters: str
+    preparation_suggestion: str
+
+
+class InterviewPrepData(BaseModel):
+    """Structured interview preparation content for a tailored resume."""
+
+    role_fit_analysis: list[str]
+    resume_questions: list[InterviewPrepQuestion]
+    project_follow_ups: list[InterviewPrepQuestion]
+    skill_gaps: list[InterviewPrepSkillGap]
+    talking_points: list[str]
+
+
+class ResumeFetchData(BaseModel):
+    """Data payload for resume fetch response."""
+
+    resume_id: str
+    raw_resume: RawResume
+    processed_resume: ResumeData | None = None
+    cover_letter: str | None = None
+    outreach_message: str | None = None
+    interview_prep: InterviewPrepData | None = None
+    parent_id: str | None = None  # For determining if resume is tailored
+    title: str | None = None
+    is_master: bool = False
+    is_default_master: bool = False
+    # None until the resume is formatted in the builder (= the default template).
+    template_settings: "TemplateSettings | None" = None
+
+
+class ResumeFetchResponse(BaseModel):
+    """Response for resume fetch."""
+
+    request_id: str
+    data: ResumeFetchData
+
+
+class ResumeSummary(BaseModel):
+    """Summary details for listing resumes."""
+
+    resume_id: str
+    filename: str | None = None
+    is_master: bool = False
+    is_default_master: bool = False
+    parent_id: str | None = None
+    processing_status: str = "pending"
+    created_at: str
+    updated_at: str
+    title: str | None = None
+    template_settings: "TemplateSettings | None" = None
+
+
+class ResumeListResponse(BaseModel):
+    """Response for resume list."""
+
+    request_id: str
+    data: list[ResumeSummary]
+
+
+class SetDefaultMasterResponse(BaseModel):
+    """Response after switching the default master resume."""
+
+    resume_id: str
+    is_default_master: bool
+
+
+class DuplicateResumeResponse(BaseModel):
+    """Response after duplicating a resume."""
+
+    resume_id: str
+    title: str
+    is_master: bool
+    is_default_master: bool
+    parent_id: str | None = None
+
+
+# Job Description Models
+class JobUploadRequest(BaseModel):
+    """Request to upload job descriptions."""
+
+    job_descriptions: list[str]
+    resume_id: str | None = None
+
+
+class JobUploadResponse(BaseModel):
+    """Response for job upload."""
+
+    message: str
+    job_id: list[str]
+    request: dict[str, Any]
+
+
+# Improvement Models
+ResumeTemplate = Literal[
+    "swiss-single",
+    "swiss-two-column",
+    "modern",
+    "modern-two-column",
+    "latex",
+    "clean",
+    "vivid",
+    "vivid-single",
+    "modern-deedy",
+    "deedy",
+]
+
+
+class TemplateMargins(BaseModel):
+    """Page margins in mm."""
+
+    top: int = Field(10, ge=5, le=25)
+    bottom: int = Field(10, ge=5, le=25)
+    left: int = Field(10, ge=5, le=25)
+    right: int = Field(10, ge=5, le=25)
+
+
+class TemplateSpacing(BaseModel):
+    """Spacing levels (1-5)."""
+
+    section: int = Field(3, ge=1, le=5)
+    item: int = Field(2, ge=1, le=5)
+    lineHeight: int = Field(3, ge=1, le=5)
+
+
+class TemplateFontSize(BaseModel):
+    """Type scale levels (1-5) and font families."""
+
+    base: int = Field(3, ge=1, le=5)
+    headerScale: int = Field(3, ge=1, le=5)
+    # Headers and body share one typeface by default so the whole resume reads
+    # as one font (user feedback 2026-11-04). The CSS also enforces this via
+    # --unified-font in frontend _base.module.css.
+    headerFont: Literal["serif", "sans-serif", "mono"] = "sans-serif"
+    bodyFont: Literal["serif", "sans-serif", "mono"] = "sans-serif"
+
+
+class TemplateSettings(BaseModel):
+    """A resume's saved formatting.
+
+    Mirrors TemplateSettings in apps/frontend/lib/types/template-settings.ts.
+    """
+
+    template: ResumeTemplate = "swiss-single"
+    pageSize: Literal["A4", "LETTER"] = "A4"
+    margins: TemplateMargins = Field(default_factory=TemplateMargins)
+    spacing: TemplateSpacing = Field(default_factory=TemplateSpacing)
+    fontSize: TemplateFontSize = Field(default_factory=TemplateFontSize)
+    compactMode: bool = False
+    showContactIcons: bool = False
+    accentColor: Literal["blue", "green", "orange", "red"] = "blue"
+    # Orders saves from one builder session (a tab): `revision` counts up per session.
+    # A save older than the stored one from the same session is ignored, so that
+    # tab's requests arriving out of order cannot undo its newer choice. Saves from
+    # other sessions always apply (the last to arrive wins); no clocks involved.
+    session: str | None = Field(None, max_length=64)
+    revision: int = Field(0, ge=0)
+
+
+# ResumeFetchData is declared above TemplateSettings.
+ResumeFetchData.model_rebuild()
+ResumeFetchResponse.model_rebuild()
+ResumeSummary.model_rebuild()
+ResumeListResponse.model_rebuild()
+
+
+class PageFitSettings(BaseModel):
+    """Print settings used to measure page count (mirrors GET /resumes/{id}/pdf)."""
+
+    template: ResumeTemplate = "swiss-single"
+    pageSize: Literal["A4", "LETTER"] = "A4"
+    marginTop: int = Field(10, ge=5, le=25)
+    marginBottom: int = Field(10, ge=5, le=25)
+    marginLeft: int = Field(10, ge=5, le=25)
+    marginRight: int = Field(10, ge=5, le=25)
+    sectionSpacing: int = Field(3, ge=1, le=5)
+    itemSpacing: int = Field(2, ge=1, le=5)
+    lineHeight: int = Field(3, ge=1, le=5)
+    fontSize: int = Field(3, ge=1, le=5)
+    headerScale: int = Field(3, ge=1, le=5)
+    # Unified font family across the resume (see TemplateFontSize default).
+    headerFont: Literal["serif", "sans-serif", "mono"] = "sans-serif"
+    bodyFont: Literal["serif", "sans-serif", "mono"] = "sans-serif"
+    compactMode: bool = False
+    showContactIcons: bool = False
+    accentColor: Literal["blue", "green", "orange", "red"] = "blue"
+    lang: str | None = Field(None, pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
+    # Academic CV mode: no page cap. Page fit and verification report the page count
+    # but never trim to a limit or raise an over-limit warning. Not a print setting,
+    # so it is not sent to the print route.
+    cv_mode: bool = False
+
+    def to_query(self) -> dict[str, str]:
+        query: dict[str, str] = {}
+        for name, value in self.model_dump(
+            exclude_none=True, exclude={"cv_mode"}
+        ).items():
+            query[name] = str(value).lower() if isinstance(value, bool) else str(value)
+        return query
+
+
+class ImproveResumeRequest(BaseModel):
+    """Request to improve/tailor a resume."""
+
+    resume_id: str
+    job_id: str
+    prompt_id: str | None = None
+    max_bullets_per_entry: int | None = Field(None, ge=1, le=10)
+    page_fit: PageFitSettings | None = None
+    # Page budget for page_fit; ignored without page_fit.
+    max_pages: int = Field(1, ge=1, le=5)
+    # Client-chosen id for GET /resumes/improve/progress/{id} (live stages).
+    progress_id: str | None = Field(None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class BulletSelectionSummary(BaseModel):
+    """What the harness kept/dropped when tailoring from a long master."""
+
+    max_per_entry: int | None  # None = no per-entry cap
+    # Page cap used for page fit; None = no cap (page fit skipped, or cv_mode).
+    max_pages: int | None = None
+    bullets_before: int
+    bullets_after: int
+    trimmed_for_fit: int = 0
+    scoring: Literal["llm", "keyword_fallback"]
+    page_fit: Literal["fits", "trimmed", "over", "unavailable", "skipped"]
+    final_pages: int | None = None
+    # Re-render of the rewritten result: "ok" = final_pages measures it, "skipped" =
+    # it could not be rendered (final_pages is then the pre-rewrite measurement),
+    # None = no final check applies (page fit skipped, over or unavailable).
+    final_check: Literal["ok", "skipped"] | None = None
+
+
+class ImprovementSuggestion(BaseModel):
+    """Single improvement suggestion."""
+
+    suggestion: str
+    lineNumber: int | None = None
+
+
+class ResumeFieldDiff(BaseModel):
+    """Single field change record."""
+
+    field_path: str  # Example: "workExperience[0].description[2]"
+    field_type: Literal[
+        "skill",
+        "description",
+        "summary",
+        "certification",
+        "experience",
+        "education",
+        "project",
+        "language",
+        "award",
+    ]
+    change_type: Literal["added", "removed", "modified"]
+    original_value: str | None = None
+    new_value: str | None = None
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+
+class ResumeDiffSummary(BaseModel):
+    """Change summary stats."""
+
+    total_changes: int
+    skills_added: int
+    skills_removed: int
+    descriptions_modified: int
+    certifications_added: int
+    high_risk_changes: int  # High-risk additions
+
+
+class ATSSubScores(BaseModel):
+    """Individual component scores that make up the ATS overall score."""
+
+    keyword_match: float = Field(
+        default=0.0, ge=0.0, le=100.0, description="Keyword match % (0–100)"
+    )
+    skills_coverage: float = Field(
+        default=0.0, ge=0.0, le=100.0, description="JD skills matched in resume (0–100)"
+    )
+    title_match: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Posting's exact job title in headline/summary (0–100); "
+        "None when the posting has no title",
+    )
+    section_completeness: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description="Contact info + visible key resume sections present (0–100)",
+    )
+    date_consistency: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Share of dates in the dominant format (0–100); "
+        "None when the resume has fewer than two dates",
+    )
+
+
+class ATSScore(BaseModel):
+    """ATS-style score breakdown for a resume against a job description."""
+
+    overall_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description="Weighted composite ATS score (0–100)",
+    )
+    sub_scores: ATSSubScores = Field(default_factory=ATSSubScores)
+    missing_keywords: list[str] = Field(
+        default_factory=list,
+        description="Job keywords absent from the tailored resume",
+    )
+    injectable_keywords: list[str] = Field(
+        default_factory=list,
+        description="Missing keywords that exist in the master resume and can be safely added",
+    )
+    recommendations: list[str] = Field(
+        default_factory=list,
+        description="Actionable suggestions to improve the ATS score",
+    )
+
+
+class ATSScoreRecord(BaseModel):
+    """Last calculated ATS score of a saved tailored resume."""
+
+    score: ATSScore
+    calculated_at: str = Field(description="UTC ISO-8601 time of the calculation")
+
+
+class ImproveResumeData(BaseModel):
+    """Data payload for improve response."""
+
+    request_id: str
+    preview_id: str | None = None
+    preview_expires_at: str | None = None
+    resume_id: str | None = Field(
+        default=None,
+        description="Null for preview responses; populated when the tailored resume is persisted.",
+    )
+    job_id: str
+    resume_preview: ResumeData
+    improvements: list[ImprovementSuggestion]
+    markdownOriginal: str | None = None
+    markdownImproved: str | None = None
+    cover_letter: str | None = None
+    outreach_message: str | None = None
+    interview_prep: InterviewPrepData | None = None
+
+    # Diff metadata
+    diff_summary: ResumeDiffSummary | None = None
+    detailed_changes: list[ResumeFieldDiff] | None = None
+
+    # Refinement metadata (multi-pass refinement stats)
+    refinement_stats: "RefinementStats | None" = None
+
+    # ATS score breakdown
+    ats_score: "ATSScore | None" = None
+
+    # Harness bullet selection summary (None unless max_bullets_per_entry or page_fit was requested)
+    bullet_selection: BulletSelectionSummary | None = None
+
+    # Writing critique: score from the code rules, critic notes, rewrite counts
+    writing: WritingReport | None = None
+
+    # Keyword forcing: where each applied keyword landed, and the keywords the
+    # user forced (they lead interview prep)
+    keyword_placements: list[KeywordPlacement] = Field(default_factory=list)
+    forced_keywords: list[str] = Field(default_factory=list)
+
+    # Warning and status fields for transparency
+    warnings: list[str] = Field(default_factory=list)
+    refinement_attempted: bool = False
+    refinement_successful: bool = False
+
+
+class ImproveResumeResponse(BaseModel):
+    """Response for resume improvement."""
+
+    request_id: str
+    data: ImproveResumeData
+
+
+class ImproveResumeConfirmRequest(BaseModel):
+    """Request to confirm and save a tailored resume."""
+
+    resume_id: str
+    job_id: str
+    preview_id: str | None = None
+    improved_data: ResumeData
+    improvements: list[ImprovementSuggestion]
+    # Keywords the user forced into this preview; stored on the job link.
+    forced_keywords: list[str] = Field(default_factory=list, max_length=30)
+    # Confirmed ("I have this") keywords to add to the master's skills list.
+    master_skills_to_add: list[str] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def _validate_source_budget(self) -> "ImproveResumeConfirmRequest":
+        # A preview-sized resume remains confirmable when suggestions/IDs are
+        # added to its envelope. Each independently bounded source stays capped.
+        validate_source_size(self.improved_data.model_dump(mode="json"))
+        validate_source_size(self.model_dump(mode="json", exclude={"improved_data"}))
+        return self
+
+
+# Config Models
+ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high"]
+
+
+class LLMConfigRequest(BaseModel):
+    """Request to update LLM configuration."""
+
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    api_base: str | None = None
+    # Optional reasoning-effort override.
+    #   - A valid value ("minimal"/"low"/"medium"/"high") updates the setting.
+    #   - Empty string clears the field — the server persists "" rather than
+    #     removing the key, so the gpt-5 auto-migration does not re-fire.
+    #   - None means "don't change this field".
+    # Strictly typed so invalid values are rejected at the boundary (422)
+    # rather than corrupting config.json and crashing later reads.
+    reasoning_effort: Literal["minimal", "low", "medium", "high", ""] | None = None
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _normalize_provider(cls, value: Any) -> Any:
+        return normalize_provider(value)
+
+
+class LLMConfigResponse(BaseModel):
+    """Response for LLM configuration."""
+
+    provider: str
+    model: str
+    api_key: str  # Masked
+    api_base: str | None = None
+    reasoning_effort: ReasoningEffortLiteral | None = None
+
+
+class FeatureConfigRequest(BaseModel):
+    """Request to update feature settings."""
+
+    enable_cover_letter: bool | None = None
+    enable_outreach_message: bool | None = None
+    enable_interview_prep: bool | None = None
+
+
+class FeatureConfigResponse(BaseModel):
+    """Response for feature settings."""
+
+    enable_cover_letter: bool = False
+    enable_outreach_message: bool = False
+    enable_interview_prep: bool = False
+
+
+class LanguageConfigRequest(BaseModel):
+    """Request to update language settings."""
+
+    ui_language: str | None = None  # en, es, zh, ja - for interface
+    content_language: str | None = None  # en, es, zh, ja - for generated content
+
+
+class LanguageConfigResponse(BaseModel):
+    """Response for language settings."""
+
+    ui_language: str = "en"  # Interface language
+    content_language: str = "en"  # Generated content language
+    supported_languages: list[str] = ["en", "es", "zh", "ja", "pt", "fr", "ko"]
+
+
+class PromptOption(BaseModel):
+    """Prompt option for resume tailoring."""
+
+    id: str
+    label: str
+    description: str
+
+
+class PromptConfigRequest(BaseModel):
+    """Request to update prompt settings."""
+
+    default_prompt_id: str | None = None
+
+
+class PromptConfigResponse(BaseModel):
+    """Response for prompt settings."""
+
+    default_prompt_id: str
+    prompt_options: list[PromptOption]
+
+
+class FeaturePromptsRequest(BaseModel):
+    """Request to update custom feature prompts.
+
+    ``None`` means "don't change this field". An empty string clears the
+    override — the server persists ``""`` so runtime resolution falls back
+    to the built-in default without the key disappearing from config.json.
+    """
+
+    cover_letter_prompt: str | None = None
+    outreach_message_prompt: str | None = None
+
+
+class FeaturePromptsResponse(BaseModel):
+    """Response for custom feature prompts.
+
+    The ``*_default`` fields expose the built-in prompt strings so the UI
+    can render them as placeholder text without duplicating the content
+    across locales.
+    """
+
+    cover_letter_prompt: str
+    outreach_message_prompt: str
+    cover_letter_default: str
+    outreach_message_default: str
+
+
+# API Key Management Models
+class ApiKeyProviderStatus(BaseModel):
+    """Status of a single API key provider."""
+
+    provider: str  # openai, anthropic, google, etc.
+    configured: bool
+    masked_key: str | None = None  # Shows last 4 chars if configured
+
+
+class ApiKeyStatusResponse(BaseModel):
+    """Response for API key status check."""
+
+    providers: list[ApiKeyProviderStatus]
+
+
+class ApiKeysUpdateRequest(BaseModel):
+    """Request to update API keys."""
+
+    openai: str | None = None
+    azure_foundry: str | None = None
+    anthropic: str | None = None
+    google: str | None = None
+    openrouter: str | None = None
+    deepseek: str | None = None
+    groq: str | None = None
+    # Local/self-hosted providers that may sit behind an auth proxy.
+    openai_compatible: str | None = None
+    ollama: str | None = None
+
+
+class ApiKeysUpdateResponse(BaseModel):
+    """Response after updating API keys."""
+
+    message: str
+    updated_providers: list[str]
+
+
+# Update Cover Letter/Outreach Models
+class UpdateCoverLetterRequest(BaseModel):
+    """Request to update cover letter content."""
+
+    content: str
+
+
+class UpdateOutreachMessageRequest(BaseModel):
+    """Request to update outreach message content."""
+
+    content: str
+
+
+class UpdateTitleRequest(BaseModel):
+    """Request to update resume title."""
+
+    title: str
+
+
+class ResetDatabaseRequest(BaseModel):
+    """Request to reset database with confirmation."""
+
+    confirm: str | None = None
+
+
+class GenerateContentResponse(BaseModel):
+    """Response for on-demand content generation."""
+
+    content: str
+    message: str
+
+
+class GenerateInterviewPrepResponse(BaseModel):
+    """Response for on-demand interview preparation generation."""
+
+    interview_prep: InterviewPrepData
+    message: str
+
+
+# Health/Status Models
+class HealthResponse(BaseModel):
+    """Health check response."""
+
+    status: str
+
+
+class StatusResponse(BaseModel):
+    """Application status response.
+
+    In agent mode the user's coding agent does the AI work, so ``llm_configured``
+    and ``llm_healthy`` stay false and ``status`` is ``ready`` as soon as a master
+    resume exists.
+    """
+
+    status: str
+    llm_configured: bool
+    llm_healthy: bool
+    agent_mode: bool = Field(
+        default=False,
+        description=(
+            "True when the 'agent' provider is selected: the user's coding agent "
+            "does the AI work through the resume-matcher command or MCP, and the "
+            "app makes no model calls of its own."
+        ),
+    )
+    has_master_resume: bool
+    database_stats: dict[str, Any]
+
+
+# Diff-Based Improvement Models
+
+
+class ResumeChange(BaseModel):
+    """A single targeted change the LLM wants to make to the resume."""
+
+    path: str = Field(
+        description="Dot+bracket path, e.g. 'workExperience[0].description[1]'"
+    )
+    action: Literal["replace", "append", "reorder", "add_skill"]
+    original: str | list[str] | None = Field(
+        default=None,
+        description="Current text at path — for verification. May be a list (the "
+        "current items) for the reorder action; only used for text verification of "
+        "replace/append, ignored otherwise.",
+    )
+    value: str | list[str] = Field(description="New content")
+    reason: str = Field(description="Why this change helps match the JD")
+
+    @model_validator(mode="after")
+    def _list_original_only_for_reorder(self) -> "ResumeChange":
+        """A list ``original`` is only meaningful for ``reorder`` (the LLM sends
+        the current items). For the text actions it must stay a string/None — a
+        list there would silently bypass the replace verification gate and crash
+        the invented-metrics check, so reject it at parse time."""
+        if isinstance(self.original, list) and self.action != "reorder":
+            raise ValueError("'original' may be a list only for the reorder action")
+        return self
+
+
+class ImproveDiffResult(BaseModel):
+    """LLM output: a list of targeted resume changes."""
+
+    changes: list[ResumeChange] = Field(default_factory=list)
+    strategy_notes: str = Field(default="")
+
+
+# Single Queue Models
+MAX_QUEUE_COOLDOWN_SECONDS = 60
+
+
+class JobQueueAddRequest(BaseModel):
+    """Request to queue a single job description for background tailoring."""
+
+    resume_id: str
+    job_description: str
+    role: str | None = None
+    company: str | None = None
+    job_req_id: str | None = None
+    # Cooldown after this item; bounded so one request cannot stall the worker.
+    rate_limit_seconds: float = Field(
+        default=5.0, ge=0, le=MAX_QUEUE_COOLDOWN_SECONDS, allow_inf_nan=False
+    )
+    prompt_id: str | None = None
+
+
+class JobQueueItemResponse(BaseModel):
+    """Item in the tailoring queue."""
+
+    item_id: str
+    resume_id: str
+    job_description_snippet: str
+    role: str
+    company: str
+    job_req_id: str
+    status: str
+    tailored_resume_id: str | None = None
+    title: str | None = None
+    job_id: str | None = None
+    error: str | None = None
+    rate_limit_seconds: float
+    created_at: str
+    updated_at: str
+
+
+class JobMetadataParseRequest(BaseModel):
+    """Request to parse metadata (role, company, id) from job description."""
+
+    job_description: str
+
+
+class JobMetadataParseResponse(BaseModel):
+    """Extracted metadata from a job description."""
+
+    role: str
+    company: str
+    job_req_id: str
