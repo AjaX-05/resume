@@ -1,6 +1,7 @@
 """Resume improvement service using LLM."""
 
 import copy
+import html
 import json
 import logging
 import re
@@ -134,12 +135,25 @@ class DiffConfidence:
     modified: str
 
 
+def _strip_html(text: str) -> str:
+    """Turn pasted Greenhouse/ATS HTML into plain text so the LLM isn't chewing tags."""
+    if not text or not re.search(r"</?[a-z][\s\S]*?>", text, re.I):
+        return text
+    cleaned = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.I)
+    cleaned = re.sub(r"<style[\s\S]*?</style>", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"<br\s*/?>", "\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"</(p|div|li|h[1-6]|tr|ul|ol)>", "\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = html.unescape(cleaned)
+    return re.sub(r"[ \t]+\n", "\n", re.sub(r"\n{3,}", "\n\n", re.sub(r"[^\S\n]+", " ", cleaned))).strip()
+
+
 def _sanitize_user_input(text: str) -> str:
     """LLM-011: Sanitize user input to prevent prompt injection.
 
     Removes or redacts common injection patterns that could manipulate LLM behavior.
     """
-    sanitized = text
+    sanitized = _strip_html(text)
     for pattern in _INJECTION_PATTERNS:
         sanitized = re.sub(pattern, "[REDACTED]", sanitized, flags=re.IGNORECASE)
     return sanitized

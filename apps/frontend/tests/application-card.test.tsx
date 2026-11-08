@@ -22,6 +22,8 @@ const application = {
   company: 'Acme',
   role: 'Engineer',
   applied_at: null,
+  notes:
+    'Posted: 2026-11-08T17:08:00Z\nSeniority: Senior\nScrape-batch: 2026-11-08T18:37:21Z',
 } as Application;
 
 function renderCard(props: { selected: boolean; sharedResume?: boolean }) {
@@ -55,5 +57,21 @@ describe('ApplicationCard', () => {
     const badge = screen.getByText('tracker.card.sharedResume');
     expect(badge.querySelector('svg')).toHaveClass('size-4');
     expect(badge.querySelector('svg')).not.toHaveClass('size-3');
+  });
+
+  it('shows seniority and a this-pull marker', () => {
+    render(
+      <ApplicationCard
+        application={application}
+        selected={false}
+        sharedResume={false}
+        thisPull
+        onToggleSelect={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+    expect(screen.getByText('Senior')).toBeInTheDocument();
+    expect(screen.getByText('This pull')).toBeInTheDocument();
+    expect(screen.getByText(/Posted /)).toBeInTheDocument();
   });
 });

@@ -24,7 +24,7 @@ def stub_pipeline(
 ) -> Callable[[Pipeline], None]:
     """Replace the LLM pipeline; the default records the call and returns a resume."""
 
-    async def succeed(*, resume_id: str, job_id: str, prompt_id: str | None) -> tuple:
+    async def succeed(*, resume_id: str, job_id: str, prompt_id: str | None, **_: Any) -> tuple:
         calls.append({"resume_id": resume_id, "job_id": job_id, "prompt_id": prompt_id})
         return (
             {"resume_id": f"tailored-{len(calls)}", "title": "Dev @ Co"},
@@ -94,7 +94,7 @@ async def test_failed_item_is_recorded_and_the_queue_moves_on(
     seen: list[str] = []
 
     async def fail_first(
-        *, resume_id: str, job_id: str, prompt_id: str | None
+        *, resume_id: str, job_id: str, prompt_id: str | None, **_: Any
     ) -> tuple:
         del resume_id, prompt_id
         seen.append(job_id)
@@ -221,7 +221,7 @@ async def test_shutdown_mid_item_requeues_it_for_the_next_start(
 ) -> None:
     entered = asyncio.Event()
 
-    async def hang(*, resume_id: str, job_id: str, prompt_id: str | None) -> tuple:
+    async def hang(*, resume_id: str, job_id: str, prompt_id: str | None, **_: Any) -> tuple:
         del resume_id, job_id, prompt_id
         entered.set()
         await asyncio.Event().wait()
@@ -250,7 +250,7 @@ async def test_reset_stops_the_item_being_tailored_before_clearing(
 ) -> None:
     entered, cancelled = asyncio.Event(), asyncio.Event()
 
-    async def hang(*, resume_id: str, job_id: str, prompt_id: str | None) -> tuple:
+    async def hang(*, resume_id: str, job_id: str, prompt_id: str | None, **_: Any) -> tuple:
         del resume_id, job_id, prompt_id
         entered.set()
         try:
@@ -323,7 +323,7 @@ async def test_each_item_runs_under_the_ai_operation_deadline(
 
     budgets: list[float] = []
 
-    async def stall(*, resume_id: str, job_id: str, prompt_id: str | None) -> tuple:
+    async def stall(*, resume_id: str, job_id: str, prompt_id: str | None, **_: Any) -> tuple:
         del resume_id, job_id, prompt_id
         budgets.append(remaining_timeout(preferred=60))
         await asyncio.sleep(30)

@@ -1,9 +1,11 @@
+import html
 import re
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 import dedup
+from job_meta import classify_seniority, parse_posted
 from models import Job, SponsorshipStatus
 
 
@@ -57,6 +59,7 @@ _NO_SPONSOR = [
 _YES_SPONSOR = [
     r"(will|can|do)\s+(provide|offer|consider|support)\s*(visa\s+)?sponsorship",
     r"(h[-\s]?1b|visa)\s+sponsorship\s+(available|provided|offered|supported|considered|welcome)",
+    r"h-?1b\s+sponsor\s+likely",
     r"open\s+to\s+sponsor",
     r"sponsorship\s+(is\s+)?available",
     r"we\s+sponsor\b",
@@ -104,20 +107,57 @@ def parse_salary(salary_text: str) -> tuple[Optional[int], Optional[int]]:
 # Remote + US detector
 # ---------------------------------------------------------------------------
 
+def strip_markup(text: str) -> str:
+    """Turn Greenhouse HTML (or messy markdown) into plain text for matching."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.I)
+    cleaned = re.sub(r"<style[\s\S]*?</style>", " ", cleaned, flags=re.I)
+    if re.search(r"</?[a-z][\s\S]*?>", cleaned, re.I):
+        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = html.unescape(cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+_US_STATE_RE = re.compile(
+    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO"
+    r"|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b"
+)
+_NON_US_LOC_RE = re.compile(
+    r"\b(london|united kingdom|\buk\b|england|europe|canada|india|"
+    r"singapore|sydney|australia|berlin|paris|dublin|apac|emea)\b",
+    re.I,
+)
+
+
 def is_remote_us(location_text: str, description: str = "") -> tuple[bool, list[str]]:
-    combined = (location_text + " " + description[:500]).lower()
-    if "remote" not in combined:
+    loc = strip_markup(location_text)
+    loc_l = loc.lower()
+    desc = strip_markup(description).lower()
+    states = list(set(_US_STATE_RE.findall(loc.upper() + " " + desc.upper())))
+
+    us_in_loc = bool(
+        re.search(r"\b(united states|\bu\.s\.a?\.?\b)\b", loc_l)
+    ) or bool(_US_STATE_RE.search(loc.upper()))
+    if _NON_US_LOC_RE.search(loc) and not us_in_loc:
         return False, []
-    # exclude explicitly non-US remote
-    non_us = re.search(r"\b(canada only|uk only|europe only|australia only|india only|apac)\b", combined)
-    if non_us:
-        return False, []
-    states = re.findall(
-        r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO"
-        r"|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b",
-        combined.upper(),
-    )
-    return True, list(set(states))
+
+    # Trust the location field. Greenhouse boards put "Remote" / "Remote-Friendly"
+    # there; scanning the full JD matches Anthropic boilerplate on office roles.
+    if re.search(r"\bremote", loc_l):
+        return True, states
+
+    if re.search(
+        r"\b(remote[- ]friendly,?\s+united states|"
+        r"remote in the (us|u\.s\.?|united states)|"
+        r"us remote|remote us|remote,?\s+united states|"
+        r"work from home anywhere in the (us|united states)|"
+        r"anywhere in the (us|u\.s\.?|united states))\b",
+        desc,
+    ):
+        return True, states
+
+    return False, []
 
 
 # ---------------------------------------------------------------------------
@@ -125,19 +165,21 @@ def is_remote_us(location_text: str, description: str = "") -> tuple[bool, list[
 # ---------------------------------------------------------------------------
 
 def to_job(extracted: ExtractedJob, source: str, source_url: str) -> Job:
-    full_text = extracted.description + " " + extracted.sponsorship_text
+    description = strip_markup(extracted.description) or extracted.description
+    full_text = description + " " + extracted.sponsorship_text
     spons_status, spons_evidence = classify_sponsorship(full_text)
     salary_min, salary_max = parse_salary(extracted.salary_text)
-    is_remote, remote_states = is_remote_us(extracted.location_text, extracted.description)
+    is_remote, remote_states = is_remote_us(extracted.location_text, description)
 
     apply = extracted.apply_url or source_url
     fp = dedup.make_fingerprint(extracted.company, extracted.title, apply)
-    ch = dedup.make_content_hash(extracted.description)
+    ch = dedup.make_content_hash(description)
+    posted_iso, _ = parse_posted(extracted.posting_date or description[:800])
 
     return Job(
         title=extracted.title,
         company=extracted.company,
-        description=extracted.description,
+        description=description,
         skills=extracted.skills,
         responsibilities=extracted.responsibilities,
         salary_text=extracted.salary_text,
@@ -152,7 +194,8 @@ def to_job(extracted: ExtractedJob, source: str, source_url: str) -> Job:
         apply_url=apply,
         source_url=source_url,
         source=source,
-        posting_date=extracted.posting_date or None,
+        posting_date=posted_iso,
+        seniority=classify_seniority(extracted.title, description),
         req_id=extracted.req_id or None,
         fingerprint=fp,
         content_hash=ch,

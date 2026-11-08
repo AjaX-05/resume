@@ -216,9 +216,30 @@ class QueueManager:
                 self._wake.set()
 
     async def drain(self) -> None:
-        """Process pending items until none is left, cooling down after each one."""
+        """Process pending items until none is left, cooling down after each one.
+
+        A failure on item 3 of 10 is recorded and skipped; items 4–10 still run.
+        """
         while (item := await db.claim_next_queue_item()) is not None:
-            await self._process_item(item)
+            try:
+                await self._process_item(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Queue item %s crashed the worker loop; continuing the batch.",
+                    item.get("item_id"),
+                )
+                try:
+                    await self._record_outcome(
+                        item["item_id"], {"status": "failed", "error": "failed"}
+                    )
+                    await self._notify_pipeline(item["item_id"], None, "failed")
+                except Exception:
+                    logger.exception(
+                        "Could not mark crashed queue item %s failed.",
+                        item.get("item_id"),
+                    )
             if item["rate_limit_seconds"] > 0:
                 await self._cooldown(item["rate_limit_seconds"])
 
@@ -229,6 +250,7 @@ class QueueManager:
     async def _process_item(self, item: dict[str, Any]) -> None:
         """Tailor one claimed item and record the outcome on its row."""
         item_id = item["item_id"]
+        await self._notify_pipeline_started(item_id)
         try:
             tailored_resume = await self._tailor(item)
         except asyncio.CancelledError:
@@ -262,6 +284,16 @@ class QueueManager:
         # Notify pipeline tracker — links tailored resume → application card
         # and (if auto_apply) kicks off the apply flow.
         await self._notify_pipeline(item_id, tailored_id, None)
+
+    @staticmethod
+    async def _notify_pipeline_started(item_id: str) -> None:
+        """Tell the pipeline tracker which item is in the LLM right now."""
+        try:
+            from app.services.pipeline_service import on_queue_item_started
+
+            on_queue_item_started(item_id)
+        except Exception as e:
+            logger.debug("Pipeline start notification skipped for %s: %s", item_id, e)
 
     @staticmethod
     async def _notify_pipeline(
@@ -318,11 +350,20 @@ class QueueManager:
             job_id = job["job_id"]
             await db.update_queue_item(item["item_id"], {"job_id": job_id})
         # The same per-operation deadline AIOperationRoute gives POST /improve.
+        from app.schemas.models import PageFitSettings
+        from app.services.pipeline_service import load_config
+
+        cfg = load_config()
+        max_pages = int(cfg.get("tailor_max_pages") or 3)
+        prompt_id = item.get("prompt_id") or cfg.get("tailor_prompt_id") or "full"
         async with operation_budget(settings.request_timeout_seconds):
             tailored_resume, *_ = await resumes.execute_tailoring_pipeline(
                 resume_id=item["resume_id"],
                 job_id=job_id,
-                prompt_id=item.get("prompt_id"),
+                prompt_id=prompt_id,
+                max_pages=max_pages,
+                page_fit=PageFitSettings(),
+                max_bullets_per_entry=None,
             )
         return tailored_resume
 

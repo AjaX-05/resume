@@ -213,5 +213,6 @@ class QueueItem(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     rate_limit_seconds: Mapped[float] = mapped_column(Float, default=5.0)
     prompt_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    application_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)

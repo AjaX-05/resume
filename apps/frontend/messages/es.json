@@ -871,7 +871,8 @@
       "rateLimit": "Se alcanzó el límite de tasa. Espera aproximadamente un minuto e inténtalo de nuevo.",
       "timeout": "La vista previa del currículum agotó el tiempo de espera tras {minutes} minutos. Inténtalo de nuevo con una descripción del trabajo más corta o un prompt más simple.",
       "failedToGenerate": "No se pudo generar el currículum. Revisa tu clave API en Configuración e inténtalo de nuevo.",
-      "failedToPreview": "No se pudo previsualizar el currículum. Revisa tu clave API en Configuración e inténtalo de nuevo.",
+      "failedToPreview": "No se pudo previsualizar el currículum. Si usas un modelo local, acorta la oferta o usa un prompt más simple.",
+      "localModelJson": "El modelo local no devolvió un currículum adaptado completo. Inténtalo de nuevo, acorta la oferta o usa un prompt más simple.",
       "failedToConfirm": "No se pudieron aplicar los cambios. Inténtalo de nuevo.",
       "previewUnavailable": "La vista previa caducó o el currículum original cambió. Genera una nueva vista previa antes de guardar."
     },
@@ -1462,6 +1463,9 @@
       "sharedResume": "Currículum compartido",
       "selectAria": "Seleccionar candidatura",
       "dragAria": "Arrastra para reordenar"
+    },
+    "column": {
+      "selectAll": "Seleccionar todo {title}"
     },
     "modal": {
       "jobDescription": "Descripción del empleo",

@@ -3,9 +3,11 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,75 +28,165 @@ _DISCOVERED_DIR = _SCRAPER_DIR / "data" / "discovered"
 # In-memory state — resets on backend restart
 _state: dict = {
     "running": False,
+    "stopping": False,
     "source": None,
     "last_run_at": None,
     "last_jobs_found": 0,
     "last_error": None,
     "last_log_tail": None,  # last ~40 lines of subprocess output for debugging
     "last_auto_tailor_task_id": None,  # task_id if auto_tailor fired after this run
+    "lookback_minutes": 60,
 }
 _lock = threading.Lock()
+_proc: subprocess.Popen | None = None
+_stop_requested = False
 
 # Timestamp of the scrape start — used to find NEW application cards afterwards
 # (anything created on/after this timestamp is a product of this scrape run).
 _scrape_started_at: dict[str, str] = {"value": ""}
+_SCRAPE_TIMEOUT_SECONDS = 2400  # 40 min; cards are posted live so a timeout still leaves jobs
 
 
-def _run(source: str) -> None:
+def _bump_jobs_from_line(line: str, jobs_found: int) -> int:
+    if "Kanban card created" in line:
+        jobs_found += 1
+    m = re.search(r"(\d+)\s+new(?:/changed)?\s+jobs?", line, re.IGNORECASE)
+    if m:
+        jobs_found = max(jobs_found, int(m.group(1)))
+    return jobs_found
+
+
+def _scraper_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    # Cursor/sandbox caches a Playwright browser tree that Jobright cannot use.
+    # channel=chrome needs the real installed Chrome, not that path.
+    env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    return env
+
+
+def _popen_kwargs() -> dict:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {}
+
+
+def _kill_proc(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _run(source: str, lookback_minutes: int = 60) -> None:
+    global _proc, _stop_requested
     with _lock:
         if _state["running"]:
             return
+        _stop_requested = False
         _state.update(
-            running=True, source=source, last_error=None,
+            running=True,
+            stopping=False,
+            source=source,
+            lookback_minutes=lookback_minutes,
+            last_error=None,
+            last_jobs_found=0,
+            last_log_tail=None,
             last_auto_tailor_task_id=None,
         )
     # Record scrape start time so we can find NEW cards afterwards
     _scrape_started_at["value"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        cmd = [str(_PYTHON), str(_SCRIPT), "--once"]
+        cmd = [str(_PYTHON), "-u", str(_SCRIPT), "--once"]
         if source != "all":
             cmd += ["--source", source]
+        cmd += ["--lookback-minutes", str(lookback_minutes)]
 
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(_SCRAPER_DIR),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=900,  # 15 min max
+            env=_scraper_env(),
+            bufsize=1,
+            **_popen_kwargs(),
         )
-
-        # Parse "N new jobs" from stdout.
-        # The log line is "=== Done in 42s — 5 new jobs → batch-XX.json ==="
-        # so we look for `(\d+)\s+new\s+jobs?` specifically to avoid matching
-        # the elapsed-seconds number that appears first in the line.
+        with _lock:
+            _proc = proc
+            if _stop_requested:
+                _kill_proc(proc)
+        lines: list[str] = []
         jobs_found = 0
-        for line in result.stdout.splitlines():
-            m = re.search(r"(\d+)\s+new(?:/changed)?\s+jobs?", line, re.IGNORECASE)
-            if m:
-                jobs_found = int(m.group(1))
-                break
 
-        # Keep the tail of combined output for the UI (useful when 0 jobs found)
-        combined = (result.stdout or "") + (result.stderr or "")
+        def _pump() -> None:
+            nonlocal jobs_found
+            if proc.stdout is None:
+                return
+            for line in proc.stdout:
+                lines.append(line)
+                jobs_found = _bump_jobs_from_line(line, jobs_found)
+                with _lock:
+                    _state.update(
+                        last_jobs_found=jobs_found,
+                        last_log_tail="".join(lines[-40:]),
+                    )
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+        timed_out = False
+        try:
+            proc.wait(timeout=_SCRAPE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_proc(proc)
+        reader.join(timeout=5)
+        returncode = proc.poll()
+        combined = "".join(lines)
         log_tail = "\n".join(combined.splitlines()[-40:]) if combined else None
+        with _lock:
+            stopped = _stop_requested
+        error = None
+        if stopped:
+            error = (
+                f"Stopped by user; {jobs_found} job(s) already added"
+                if jobs_found
+                else "Stopped by user"
+            )
+        elif timed_out:
+            error = (
+                f"Stopped after {_SCRAPE_TIMEOUT_SECONDS // 60} minutes; "
+                f"{jobs_found} job(s) already added"
+                if jobs_found
+                else f"Timed out after {_SCRAPE_TIMEOUT_SECONDS // 60} minutes"
+            )
+        elif returncode not in (0, None) and jobs_found == 0:
+            error = combined[-400:] if combined else f"scraper exited {returncode}"
 
         with _lock:
+            _proc = None
             _state.update(
                 running=False,
+                stopping=False,
                 last_run_at=datetime.now(timezone.utc).isoformat(),
                 last_jobs_found=jobs_found,
-                last_error=result.stderr[-400:] if result.returncode != 0 else None,
+                last_error=error,
                 last_log_tail=log_tail,
             )
 
-        # ────────────────────────────────────────────────────────────────
-        # SCRAPE → AUTO-TAILOR hook
-        # If pipeline.auto_tailor is on AND we found new jobs, bulk-queue
-        # them for tailoring. Only supported ATS are queued; unsupported
-        # cards are skipped (saves LLM credits).
-        # ────────────────────────────────────────────────────────────────
-        if jobs_found > 0 and result.returncode == 0:
+        if jobs_found > 0 and not timed_out and not stopped and returncode == 0:
             try:
                 task_id = _run_auto_tailor_sync()
                 if task_id:
@@ -104,13 +196,11 @@ def _run(source: str) -> None:
             except Exception as e:
                 logger.warning("Auto-tailor after scrape failed: %s", e)
 
-    except subprocess.TimeoutExpired:
-        with _lock:
-            _state.update(running=False, last_error="Timed out after 15 minutes")
     except Exception as e:
         logger.error(f"Scraper subprocess error: {e}")
         with _lock:
-            _state.update(running=False, last_error=str(e))
+            _proc = None
+            _state.update(running=False, stopping=False, last_error=str(e))
 
 
 def _run_auto_tailor_sync() -> str | None:
@@ -162,7 +252,7 @@ def _run_auto_tailor_sync() -> str | None:
             supported_ids,
             master_id,
             prompt_id=cfg.get("tailor_prompt_id", "full"),
-            rate_limit_seconds=cfg.get("tailor_rate_limit_seconds", 5.0),
+            rate_limit_seconds=cfg.get("tailor_rate_limit_seconds", 10.0),
         )
         return task.task_id
 
@@ -173,8 +263,12 @@ def _run_auto_tailor_sync() -> str | None:
         return None
 
 
+_ALLOWED_LOOKBACK = {30, 60, 120, 180, 240, 360, 720, 1440}
+
+
 class RunRequest(BaseModel):
     source: str = "all"  # "all" | "jobright" | "wellfound" | "ycjobs"
+    lookback_minutes: int = 60
 
 
 @router.post("/run")
@@ -185,13 +279,29 @@ def run_scraper(req: RunRequest) -> dict:
             status_code=503,
             detail="Job scraper not set up. Run: cd apps/job-scraper && uv sync",
         )
+    lookback = req.lookback_minutes if req.lookback_minutes in _ALLOWED_LOOKBACK else 60
     with _lock:
         if _state["running"]:
             return {"status": "already_running", **_state}
 
-    thread = threading.Thread(target=_run, args=(req.source,), daemon=True)
+    thread = threading.Thread(target=_run, args=(req.source, lookback), daemon=True)
     thread.start()
-    return {"status": "started", "source": req.source}
+    return {"status": "started", "source": req.source, "lookback_minutes": lookback}
+
+
+@router.post("/stop")
+def stop_scraper() -> dict:
+    """Kill the live scrape subprocess (including Chrome children) immediately."""
+    global _stop_requested
+    with _lock:
+        if not _state["running"]:
+            return {"status": "idle", **dict(_state)}
+        _stop_requested = True
+        _state["stopping"] = True
+        proc = _proc
+    if proc is not None:
+        _kill_proc(proc)
+    return {"status": "stopping"}
 
 
 @router.get("/status")
@@ -230,6 +340,10 @@ def _build_notes(job: dict) -> str:
     if job.get("equity_text"):
         lines.append(f"Equity: {job['equity_text']}")
     lines.append(f"Sponsorship: {job.get('sponsorship_status', 'not_mentioned')}")
+    if job.get("posting_date"):
+        lines.append(f"Posted: {job['posting_date']}")
+    if job.get("seniority"):
+        lines.append(f"Seniority: {job['seniority']}")
     lines.append(f"Apply: {job.get('apply_url', '')}")
     if job.get("linkedin_contacts"):
         lines.append("LinkedIn: " + " | ".join(job["linkedin_contacts"]))
@@ -259,9 +373,16 @@ async def sync_existing_discoveries() -> dict:
         )
     resume_id = master["resume_id"]
 
-    # Get existing applications to skip duplicates (match on company + role)
+    # Get existing applications to skip duplicates (match on company + role,
+    # ignoring "Role @ Company" title clutter so Omnicom doesn't land twice).
+    from app.services.pipeline_service import card_fingerprint
+
     existing = await db.list_applications()
-    seen = {(a.get("company", "").lower(), a.get("role", "").lower()) for a in existing}
+    seen = {
+        card_fingerprint(a.get("company"), a.get("role"))
+        for a in existing
+        if card_fingerprint(a.get("company"), a.get("role"))
+    }
 
     synced = 0
     skipped = 0
@@ -275,8 +396,8 @@ async def sync_existing_discoveries() -> dict:
             continue
 
         for job in data:
-            key = (job.get("company", "").lower(), job.get("title", "").lower())
-            if key in seen:
+            key = card_fingerprint(job.get("company"), job.get("title"))
+            if key and key in seen:
                 skipped += 1
                 continue
             try:
@@ -291,7 +412,8 @@ async def sync_existing_discoveries() -> dict:
                     notes=notes,
                 )
                 synced += 1
-                seen.add(key)
+                if key:
+                    seen.add(key)
             except Exception as e:
                 logger.warning(f"Failed to sync {job.get('title')} @ {job.get('company')}: {e}")
                 errors += 1

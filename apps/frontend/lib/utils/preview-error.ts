@@ -40,6 +40,14 @@ export function getPreviewErrorMessage(
   }
 
   if (
+    normalized.includes('invalid or empty json') ||
+    normalized.includes('did not return a complete') ||
+    normalized.includes('did not finish a valid')
+  ) {
+    return t('tailor.errors.localModelJson');
+  }
+
+  if (
     normalized.includes('timed out') ||
     normalized.includes('timeout') ||
     normalized.includes('signal is aborted') ||

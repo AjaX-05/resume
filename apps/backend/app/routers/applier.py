@@ -7,12 +7,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.database import db
+from app.services.apply_answers import merge_vault, redact_vault
 from app.services.applier_service import (
     ApplyStatus,
     approve_application,
     get_session,
     list_sessions,
     load_vault,
+    prepare_vault,
     reject_application,
     save_vault,
     start_application,
@@ -50,21 +52,10 @@ async def start_apply(req: StartApplyRequest) -> ApplyStatusResponse:
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
 
-    # Extract apply URL from notes (stored by the scraper)
-    notes: str = app.get("notes") or ""
-    apply_url: str | None = None
-    for line in notes.splitlines():
-        if line.lower().startswith("apply:"):
-            apply_url = line.split(":", 1)[1].strip()
-            break
+    from app.services.apply_urls import effective_apply_url
 
-    if not apply_url:
-        # Try job_content as fallback
-        content = app.get("job_content") or ""
-        import re
-        m = re.search(r"\*\*Apply:\*\*\s*(https?://\S+)", content)
-        if m:
-            apply_url = m.group(1).strip()
+    notes: str = app.get("notes") or ""
+    apply_url = effective_apply_url(notes, app.get("job_content") or "")
 
     if not apply_url:
         raise HTTPException(
@@ -95,7 +86,16 @@ async def start_apply(req: StartApplyRequest) -> ApplyStatusResponse:
             detail=f"Unexpected PDF error: {e}",
         )
 
-    session = start_application(req.application_id, apply_url, pdf_bytes)
+    vault = await prepare_vault(req.resume_id)
+    session = start_application(
+        req.application_id,
+        apply_url,
+        pdf_bytes,
+        vault=vault,
+        company=app.get("company") or "",
+        role=app.get("role") or "",
+        notes=notes,
+    )
 
     # Update application status to ready_to_apply
     try:
@@ -195,12 +195,13 @@ async def active_sessions() -> list[dict[str, Any]]:
 
 @router.get("/vault")
 async def get_vault() -> dict[str, Any]:
-    """Get the current vault configuration (personal details, work auth, etc.)."""
-    return load_vault()
+    """Get apply-profile settings with secrets redacted."""
+    return redact_vault(load_vault())
 
 
 @router.put("/vault")
 async def update_vault(vault: dict[str, Any]) -> dict[str, Any]:
-    """Update the vault configuration."""
-    save_vault(vault)
-    return vault
+    """Merge apply-profile updates. Blank/******** secrets keep the stored value."""
+    merged = merge_vault(load_vault(), vault)
+    save_vault(merged)
+    return redact_vault(merged)

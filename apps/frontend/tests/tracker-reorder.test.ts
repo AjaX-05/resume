@@ -84,4 +84,26 @@ describe('planMove', () => {
     const columns = { ...emptyColumns(), applied: [card('a', 'applied', 0)] };
     expect(planMove(columns, 'ghost', 'a')).toBeNull();
   });
+
+  it('treats column:saved:Mid as the JD status, not a new stage', () => {
+    const columns = { ...emptyColumns(), applied: [card('a', 'applied', 0)] };
+    const plan = planMove(columns, 'a', 'column:saved:Mid');
+    expect(plan!.status).toBe('saved');
+    expect(plan!.next.saved.map((x) => x.application_id)).toEqual(['a']);
+  });
+
+  it('does not move a Mid JD onto a different seniority lane', () => {
+    const mid = { ...card('a', 'saved', 0), role: 'Software Engineer' };
+    const columns = { ...emptyColumns(), saved: [mid] };
+    expect(planMove(columns, 'a', 'column:saved:Senior')).toBeNull();
+  });
+
+  it('reorders within the matching JD seniority lane', () => {
+    const a = { ...card('a', 'saved', 0), role: 'Software Engineer' };
+    const b = { ...card('b', 'saved', 1), role: 'Backend Engineer' };
+    const columns = { ...emptyColumns(), saved: [a, b] };
+    const plan = planMove(columns, 'a', 'column:saved:Mid');
+    expect(plan!.status).toBe('saved');
+    expect(plan!.next.saved.map((x) => x.application_id)).toEqual(['b', 'a']);
+  });
 });

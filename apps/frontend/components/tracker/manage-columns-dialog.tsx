@@ -1,7 +1,6 @@
 'use client';
 
 import React from 'react';
-import { APPLICATION_STATUS_ORDER, type ApplicationStatus } from '@/lib/api/tracker';
 import { useTranslations } from '@/lib/i18n';
 import { Button } from '@/components/ui/button';
 import {
@@ -14,19 +13,30 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ToggleSwitch } from '@/components/ui/toggle-switch';
-import { isLastVisibleStatus } from '@/lib/utils/tracker-column-visibility';
+import {
+  BOARD_COLUMN_ORDER,
+  isLastVisibleColumn,
+  type BoardColumnId,
+} from '@/lib/utils/tracker-column-visibility';
 
 interface ManageColumnsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  hiddenStatuses: Set<ApplicationStatus>;
-  onToggle: (status: ApplicationStatus) => void;
+  hiddenColumns: Set<BoardColumnId>;
+  onToggle: (columnId: BoardColumnId) => void;
+}
+
+export function columnLabel(columnId: BoardColumnId, t: (key: string) => string): string {
+  if (columnId.startsWith('saved:')) {
+    return `${t('tracker.columns.saved')}-${columnId.slice('saved:'.length)}`;
+  }
+  return t(`tracker.columns.${columnId}`);
 }
 
 export function ManageColumnsDialog({
   open,
   onOpenChange,
-  hiddenStatuses,
+  hiddenColumns,
   onToggle,
 }: ManageColumnsDialogProps) {
   const { t } = useTranslations();
@@ -40,19 +50,15 @@ export function ManageColumnsDialog({
         </DialogHeader>
 
         <DialogBody className="space-y-3">
-          {APPLICATION_STATUS_ORDER.map((status) => {
-            const hidden = hiddenStatuses.has(status);
-            // The last stage on the board is locked: hiding it would leave a
-            // blank canvas reachable only through this dialog.
-            const lastVisible = isLastVisibleStatus(hiddenStatuses, status);
+          {BOARD_COLUMN_ORDER.map((columnId) => {
+            const hidden = hiddenColumns.has(columnId);
+            const lastVisible = isLastVisibleColumn(hiddenColumns, columnId);
             return (
-              <div key={status}>
+              <div key={columnId}>
                 <ToggleSwitch
                   checked={!hidden}
-                  onCheckedChange={() => onToggle(status)}
-                  label={t(`tracker.columns.${status}`)}
-                  // State label, not an action: the switch position already
-                  // carries the action.
+                  onCheckedChange={() => onToggle(columnId)}
+                  label={columnLabel(columnId, t)}
                   description={
                     hidden ? t('tracker.manageDialog.hidden') : t('tracker.manageDialog.visible')
                   }

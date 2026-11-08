@@ -164,6 +164,16 @@ class TestProviderConfiguration:
         )
         assert get_safe_max_tokens("openai/hy3-free", config=config) == 8192
 
+    @patch("app.llm.litellm.get_model_info", side_effect=Exception("unknown model"))
+    def test_ollama_gets_full_json_budget_when_unknown(self, _mock_model_info):
+        config = LLMConfig(
+            provider="ollama",
+            model="qwen3.8:27b",
+            api_key="",
+            api_base="http://localhost:11434",
+        )
+        assert get_safe_max_tokens("ollama_chat/qwen3.8:27b", config=config) == 8192
+
 
 def test_primary_text_reads_typed_block_value_attribute():
     choice = SimpleNamespace(
@@ -579,6 +589,34 @@ class TestCompleteJsonFallback:
         assert router.acompletion.call_args.kwargs["response_format"] == {
             "type": "json_object"
         }
+
+    @pytest.mark.asyncio
+    @patch("app.llm.get_router")
+    @patch("app.llm.get_model_name")
+    @patch("app.llm._supports_json_mode")
+    async def test_ollama_json_disables_thinking(
+        self, mock_supports_json, mock_get_name, mock_get_router
+    ):
+        mock_supports_json.return_value = True
+        mock_get_name.return_value = "ollama_chat/qwen3.8:27b"
+        choice = MagicMock()
+        choice.message.content = '{"required_skills": ["Python"]}'
+        router = MagicMock()
+        router.acompletion = AsyncMock(return_value=MagicMock(choices=[choice]))
+        config = LLMConfig(
+            provider="ollama",
+            model="qwen3.8:27b",
+            api_key="",
+            api_base="http://localhost:11434",
+        )
+        mock_get_router.return_value = (router, config)
+
+        from app.llm import complete_json
+
+        result = await complete_json("Extract keywords", schema_type="keywords")
+
+        assert result == {"required_skills": ["Python"]}
+        assert router.acompletion.call_args.kwargs["think"] is False
 
     @pytest.mark.asyncio
     @patch("app.llm.get_router")

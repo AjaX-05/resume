@@ -69,6 +69,12 @@ async def get_application_by_resume(resume_id: str) -> dict:
 async def list_applications() -> ApplicationListResponse:
     """List all applications grouped by status column."""
     try:
+        from app.services.pipeline_service import collapse_tailored_clones
+
+        try:
+            await collapse_tailored_clones()
+        except Exception:
+            logger.exception("Tailored-clone collapse skipped")
         applications = await db.list_applications()
     except DatabaseBusyError:
         raise

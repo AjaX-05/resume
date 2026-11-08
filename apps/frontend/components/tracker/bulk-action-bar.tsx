@@ -19,6 +19,8 @@ interface BulkActionBarProps {
   onClear: () => void;
   onBulkTailor?: () => void;
   onBulkApply?: () => void;
+  /** True while a sequential bulk tailor/apply queue is already running. */
+  batchRunning?: boolean;
 }
 
 export function BulkActionBar({
@@ -30,6 +32,7 @@ export function BulkActionBar({
   onClear,
   onBulkTailor,
   onBulkApply,
+  batchRunning = false,
 }: BulkActionBarProps) {
   const { t } = useTranslations();
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -56,16 +59,26 @@ export function BulkActionBar({
 
       {/* Bulk Tailor — only shown when any JD-column cards with supported ATS are selected */}
       {onBulkTailor && tailorableCount > 0 && (
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          onClick={onBulkTailor}
-          title={`Tailor ${tailorableCount} supported JD card${tailorableCount === 1 ? '' : 's'}`}
-        >
-          <MagicWand aria-hidden="true" />
-          Tailor {tailorableCount}
-        </Button>
+        <div className="flex flex-col gap-0.5">
+          <Button
+            type="button"
+            variant="default"
+            size="sm"
+            onClick={onBulkTailor}
+            disabled={batchRunning}
+            title={
+              batchRunning
+                ? 'A batch is already running one job at a time'
+                : `Queue ${tailorableCount} JD${tailorableCount === 1 ? '' : 's'} — one at a time, so the local model stays alive`
+            }
+          >
+            <MagicWand aria-hidden="true" />
+            {batchRunning ? 'Queue running…' : `Tailor ${tailorableCount}`}
+          </Button>
+          <span className="font-mono text-[9px] uppercase tracking-wide text-steel">
+            one at a time
+          </span>
+        </div>
       )}
 
       {/* Bulk Auto-Apply — only shown when any Tailored cards with supported ATS are selected */}

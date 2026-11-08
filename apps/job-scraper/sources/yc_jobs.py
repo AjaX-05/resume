@@ -2,38 +2,32 @@
 YC / Work at a Startup source — filter-based search, two-phase scraping.
 """
 import logging
+import re
 import sys
 from pathlib import Path
 
 from firecrawl import FirecrawlApp
-from firecrawl.v2.types import ScrapeOptions
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from extract import ExtractedJob, ListingPageResult, to_job
+from extract import ExtractedJob, to_job
+from firecrawl_io import extract_job_json, scrape_listing_urls
 from models import Job
 
 logger = logging.getLogger(__name__)
 
-# Filter-based URLs — ml + engineering roles, remote, newest first
 SEARCH_URLS = [
     "https://www.workatastartup.com/jobs?role=ml&remote=true",
     "https://www.workatastartup.com/jobs?role=eng&remote=true",
     "https://www.workatastartup.com/jobs?role=data&remote=true",
 ]
 
-_LISTING_PROMPT = (
-    "Extract all job listings on this Work at a Startup (YC) jobs page. "
-    "For each listing return: the exact job URL, job title, company name, "
-    "salary range if shown, and location."
-)
+JOB_URL_RE = re.compile(r"https://(?:www\.)?workatastartup\.com/jobs/\d+", re.I)
 
 _JOB_PROMPT = (
     "Extract the complete job posting: title, company, full description, "
     "skills, responsibilities, salary, equity, location, sponsorship info, apply URL, posting date."
 )
-
-_OPTS = ScrapeOptions(skip_tls_verification=True, wait_for=2500)
 
 
 def paged_url(base: str, page: int) -> str:
@@ -41,33 +35,17 @@ def paged_url(base: str, page: int) -> str:
 
 
 def scan_listings(app: FirecrawlApp, url: str) -> list[dict]:
-    """Phase 1: cheap listing scan."""
-    try:
-        result = app.extract(
-            [url],
-            prompt=_LISTING_PROMPT,
-            schema=ListingPageResult.model_json_schema(),
-            scrape_options=_OPTS,
-        )
-        return (result.data or {}).get("jobs", []) if result.data else []
-    except Exception as e:
-        logger.warning(f"YC listing scan failed [{url}]: {e}")
-        return []
+    """Phase 1: scrape listing page links — no LLM."""
+    return scrape_listing_urls(app, url, JOB_URL_RE)
 
 
 def scrape_job(app: FirecrawlApp, url: str) -> Job | None:
-    """Phase 2: full scrape for a single new job URL."""
+    """Phase 2: structured JSON extract of a single job posting."""
+    data = extract_job_json(app, url, _JOB_PROMPT, ExtractedJob.model_json_schema())
+    if not data or not data.get("title"):
+        return None
     try:
-        result = app.extract(
-            [url],
-            prompt=_JOB_PROMPT,
-            schema=ExtractedJob.model_json_schema(),
-            scrape_options=_OPTS,
-        )
-        data = result.data
-        if not data or not data.get("title"):
-            return None
         return to_job(ExtractedJob(**data), source="yc_jobs", source_url=url)
     except Exception as e:
-        logger.warning(f"YC job scrape failed [{url}]: {e}")
+        logger.warning(f"YC job parse failed [{url}]: {e}")
         return None

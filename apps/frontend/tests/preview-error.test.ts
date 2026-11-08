@@ -44,6 +44,15 @@ describe('getPreviewErrorMessage', () => {
     expect(out).toBe('tailor.errors.timeout:{"minutes":15}');
   });
 
+  it('maps local-model JSON failures', () => {
+    expect(
+      getPreviewErrorMessage(
+        new Error('The local model did not return a complete tailored resume (invalid or empty JSON).'),
+        t
+      )
+    ).toBe('tailor.errors.localModelJson');
+  });
+
   it('falls back to the generic message', () => {
     expect(getPreviewErrorMessage(new Error('kaboom'), t)).toBe('tailor.errors.failedToPreview');
   });

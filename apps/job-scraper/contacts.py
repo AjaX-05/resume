@@ -12,7 +12,10 @@ _app: FirecrawlApp | None = None
 def _fc() -> FirecrawlApp:
     global _app
     if _app is None:
-        _app = FirecrawlApp(api_key=settings.firecrawl_api_key)
+        _app = FirecrawlApp(
+            api_key=settings.firecrawl_api_key or "local",
+            api_url=settings.firecrawl_api_url,
+        )
     return _app
 
 

@@ -157,10 +157,10 @@ describe('tailor page master picker', () => {
     api.list.mockResolvedValue([formatted, master('m2', false, 'Solutions Eng')]);
     await renderPage();
     await fillJobDescriptionAndGenerate();
-    // Default length settings: two-page limit, no per-role bullet cap.
+    // Default length settings: three-page limit, no per-role bullet cap.
     expect(api.preview).toHaveBeenCalledWith('m1', 'job', PROMPT_ID, {
       pageFit: { template: 'modern', lang: 'es' },
-      maxPages: 2,
+      maxPages: 3,
       progressId: expect.any(String),
     });
   });
@@ -173,7 +173,7 @@ describe('tailor page master picker', () => {
     await fillJobDescriptionAndGenerate();
     expect(api.preview).toHaveBeenCalledWith('m1', 'job', PROMPT_ID, {
       pageFit: { template: 'swiss-single', lang: 'es' },
-      maxPages: 2,
+      maxPages: 3,
       progressId: expect.any(String),
     });
   });

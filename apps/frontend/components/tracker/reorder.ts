@@ -4,8 +4,18 @@ import {
   type ApplicationColumns,
   type ApplicationStatus,
 } from '@/lib/api/tracker';
+import { cardSeniority } from '@/lib/scrape-meta';
 
 const COLUMN_PREFIX = 'column:';
+
+function parseColumnDroppable(
+  overId: string
+): { status: ApplicationStatus; lane?: string } | null {
+  if (!overId.startsWith(COLUMN_PREFIX)) return null;
+  const [status, lane] = overId.slice(COLUMN_PREFIX.length).split(':');
+  if (!APPLICATION_STATUS_ORDER.includes(status as ApplicationStatus)) return null;
+  return { status: status as ApplicationStatus, lane };
+}
 
 export interface MovePlan {
   /** The reordered columns with positions renumbered 0..n-1. */
@@ -45,10 +55,23 @@ export function planMove(
   const source = locate(columns, activeId);
   if (!source) return null;
 
-  const overIsColumn = overId.startsWith(COLUMN_PREFIX);
+  const columnDrop = parseColumnDroppable(overId);
+  const overIsColumn = columnDrop !== null;
   const targetStatus: ApplicationStatus = overIsColumn
-    ? (overId.slice(COLUMN_PREFIX.length) as ApplicationStatus)
+    ? columnDrop.status
     : (locate(columns, overId)?.status ?? source.status);
+
+  // JD is split into seniority lanes; dropping onto a different lane does not
+  // change seniority (that comes from the title), so the move is a no-op.
+  if (
+    overIsColumn &&
+    source.status === 'saved' &&
+    targetStatus === 'saved' &&
+    columnDrop.lane
+  ) {
+    const card = columns[source.status][source.index];
+    if (cardSeniority(card.role, card.notes) !== columnDrop.lane) return null;
+  }
 
   if (source.status === targetStatus) {
     const overIndex = overIsColumn

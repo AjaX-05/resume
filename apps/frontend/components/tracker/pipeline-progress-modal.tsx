@@ -22,8 +22,9 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { getPipelineTask, type PipelineItem, type PipelineTask } from '@/lib/api/pipeline';
+import { ApplyReviewModal } from './apply-review-modal';
 
-const POLL_MS = 3000;
+const POLL_MS = 2000;
 
 const STATUS_ICON = {
   pending: <CircleNotch size={13} className="text-steel" />,
@@ -53,35 +54,62 @@ interface Props {
   taskId: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onComplete?: () => void;
+  onComplete?: (task?: PipelineTask | null) => void;
+  /** Fired when another item finishes so the Kanban can move that card. */
+  onProgress?: () => void;
 }
 
-export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }: Props) {
+export function PipelineProgressModal({
+  taskId,
+  open,
+  onOpenChange,
+  onComplete,
+  onProgress,
+}: Props) {
   const [task, setTask] = useState<PipelineTask | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const completeFiredRef = useRef(false);
+  const lastDoneRef = useRef(0);
 
-  // Poll task status while modal is open and task not complete
+  // Poll for as long as a task is active — even if the dialog is hidden —
+  // so cards keep moving JD → Tailored one by one.
   useEffect(() => {
-    if (!open || !taskId) {
+    if (!taskId) {
       setTask(null);
       setError(null);
       completeFiredRef.current = false;
+      lastDoneRef.current = 0;
       return;
     }
+
+    const doneCount = (t: PipelineTask) =>
+      (t.counts.tailored ?? 0) +
+      (t.counts.applied ?? 0) +
+      (t.counts.failed ?? 0) +
+      (t.counts.skipped ?? 0);
 
     const poll = async () => {
       try {
         const t = await getPipelineTask(taskId);
         if (!t) {
           setError('Task not found (backend may have restarted)');
+          if (!completeFiredRef.current) {
+            completeFiredRef.current = true;
+            onComplete?.(null);
+          }
+          if (pollRef.current) clearInterval(pollRef.current);
           return;
         }
         setTask(t);
+        const done = doneCount(t);
+        if (done > lastDoneRef.current) {
+          lastDoneRef.current = done;
+          onProgress?.();
+        }
         if (t.completed_at && !completeFiredRef.current) {
           completeFiredRef.current = true;
-          onComplete?.();
+          onComplete?.(t);
           if (pollRef.current) clearInterval(pollRef.current);
         }
       } catch (e) {
@@ -94,7 +122,7 @@ export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [open, taskId, onComplete]);
+  }, [taskId, onComplete, onProgress]);
 
   if (!taskId) return null;
 
@@ -105,8 +133,15 @@ export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }
     (counts.tailored ?? 0) + (counts.applied ?? 0) + (counts.failed ?? 0) + (counts.skipped ?? 0);
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   const isDone = Boolean(task?.completed_at);
+  const current = task?.items.find(
+    (item) =>
+      item.status === 'tailoring' || item.status === 'applying' || item.status === 'needs_review'
+  );
+  const reviewItem = task?.items.find((item) => item.status === 'needs_review');
+  const queued = counts.queued ?? 0;
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent size="lg">
         <DialogHeader>
@@ -115,18 +150,29 @@ export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }
             Bulk {kind === 'tailor' ? 'Tailoring' : 'Applying'}
           </DialogTitle>
           <DialogDescription>
-            {task ? `${done}/${total} complete · ${pct}%` : 'Loading…'}
+            {task
+              ? current
+                ? `Now ${done + 1} of ${total}: ${current.company} — ${current.role}`
+                : `${done}/${total} complete · ${pct}%`
+              : 'Loading…'}
           </DialogDescription>
         </DialogHeader>
 
         <DialogBody className="space-y-3">
+          <p className="font-mono text-[10px] uppercase tracking-wide text-steel">
+            One job at a time
+            {queued > 0 ? ` · ${queued} waiting` : ''}
+            {kind === 'apply'
+              ? ' — Chromium applies the next resume only after this one settles.'
+              : ' — the local model is never asked to tailor in parallel.'}
+          </p>
+
           {error && (
             <div className="border border-destructive bg-destructive-tint p-2 font-mono text-xs text-destructive">
               {error}
             </div>
           )}
 
-          {/* Progress bar */}
           {task && (
             <div className="h-2 border border-ink bg-paper">
               <div
@@ -136,7 +182,6 @@ export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }
             </div>
           )}
 
-          {/* Count summary */}
           {task && Object.keys(counts).length > 0 && (
             <div className="flex flex-wrap gap-2 font-mono text-[10px]">
               {Object.entries(counts).map(([status, count]) => (
@@ -152,32 +197,39 @@ export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }
             </div>
           )}
 
-          {/* Per-item list */}
           {task && task.items.length > 0 && (
             <div className="max-h-80 overflow-y-auto border border-ink bg-canvas">
-              {task.items.map((item: PipelineItem) => (
-                <div
-                  key={item.application_id}
-                  className="flex items-center gap-2 border-b border-ink last:border-b-0 px-2 py-1.5 font-mono text-xs"
-                >
-                  <span className="shrink-0">{STATUS_ICON[item.status] ?? null}</span>
-                  <span className="flex-1 min-w-0 truncate">
-                    <span className="font-semibold text-ink">{item.company || '—'}</span>
-                    <span className="text-steel ml-1">— {item.role || item.ats}</span>
-                  </span>
-                  <span className="text-steel uppercase text-[10px] shrink-0">
-                    {item.ats || '?'}
-                  </span>
-                  {item.error && (
-                    <span
-                      className="text-destructive text-[10px] truncate max-w-32"
-                      title={item.error}
-                    >
-                      {item.error}
+              {task.items.map((item: PipelineItem) => {
+                const active =
+                  item.status === 'tailoring' ||
+                  item.status === 'applying' ||
+                  item.status === 'needs_review';
+                return (
+                  <div
+                    key={item.application_id}
+                    className={`flex items-center gap-2 border-b border-ink last:border-b-0 px-2 py-1.5 font-mono text-xs ${
+                      active ? 'bg-warning-tint' : ''
+                    }`}
+                  >
+                    <span className="shrink-0">{STATUS_ICON[item.status] ?? null}</span>
+                    <span className="flex-1 min-w-0 truncate">
+                      <span className="font-semibold text-ink">{item.company || '—'}</span>
+                      <span className="text-steel ml-1">— {item.role || item.ats}</span>
                     </span>
-                  )}
-                </div>
-              ))}
+                    <span className="text-steel uppercase text-[10px] shrink-0">
+                      {STATUS_LABEL[item.status] ?? item.status}
+                    </span>
+                    {item.error && (
+                      <span
+                        className="text-destructive text-[10px] truncate max-w-32"
+                        title={item.error}
+                      >
+                        {item.error}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </DialogBody>
@@ -193,5 +245,16 @@ export function PipelineProgressModal({ taskId, open, onOpenChange, onComplete }
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <ApplyReviewModal
+      applicationId={reviewItem?.application_id ?? null}
+      resumeId={reviewItem?.tailored_resume_id ?? null}
+      open={Boolean(reviewItem) && (open || Boolean(taskId))}
+      startOnOpen={false}
+      onOpenChange={() => {
+        /* Stay open until the session leaves needs_review. */
+      }}
+      onSubmitted={() => onProgress?.()}
+    />
+    </>
   );
 }

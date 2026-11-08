@@ -152,27 +152,29 @@ async def _auto_create_tracker_application(
     job: dict[str, Any] | None,
     title: str | None,
 ) -> None:
-    """Best-effort: drop an ``applied`` card on the tracker after a tailoring.
+    """Move the original JD card into Tailored (or create one if none exists).
 
-    Company/role come from the cached job (zero extra LLM call). Wrapped so a
-    tracker failure can never break the tailoring flow.
+    Company/role come from the cached job. Wrapped so a tracker failure can
+    never break the tailoring flow. Failures of *other* cards in a bulk batch
+    are isolated by the queue worker, not here.
     """
     try:
+        from app.services.pipeline_service import attach_tailored_resume
+
         if title is None:
             saved_resume = await db.get_resume(tailored_resume_id)
             title = (saved_resume or {}).get("title")
         company = (job or {}).get("company")
-        role = title or (job or {}).get("role")
-        await db.create_application(
-            job_id=job_id,
-            resume_id=tailored_resume_id,
+        role = (job or {}).get("role") or title
+        await attach_tailored_resume(
+            tailored_resume_id=tailored_resume_id,
             master_resume_id=master_resume_id,
-            status="applied",
+            job_id=job_id,
             company=company,
             role=role,
         )
     except Exception as e:  # noqa: BLE001 - tracker is non-critical
-        logger.warning("Failed to auto-create tracker application: %s", e)
+        logger.warning("Failed to attach tailored resume to tracker: %s", e)
 
 
 def _get_default_prompt_id() -> str:
@@ -300,6 +302,25 @@ def _normalize_personal_info_value(value: Any) -> str:
     )
 
 
+def _improve_error_detail(error: Exception, fallback: str) -> str:
+    msg = str(error).lower()
+    if "api key is not confirmed" in msg:
+        return (
+            "The API key is not confirmed for the saved Base URL. "
+            "Re-enter it in Settings."
+        )
+    if any(
+        token in msg
+        for token in ("json", "empty response", "failed to parse", "truncated")
+    ):
+        return (
+            "The local model did not return a complete tailored resume "
+            "(invalid or empty JSON). Try again, use a shorter job description, "
+            "or a simpler prompt."
+        )
+    return fallback
+
+
 def _raise_improve_error(
     action: str,
     stage: str,
@@ -307,7 +328,7 @@ def _raise_improve_error(
     detail: str,
 ) -> NoReturn:
     logger.error("Resume %s failed during %s: %s", action, stage, error)
-    raise HTTPException(status_code=500, detail=detail)
+    raise HTTPException(status_code=500, detail=_improve_error_detail(error, detail))
 
 
 def _validate_ai_sources(
@@ -2151,6 +2172,10 @@ async def execute_tailoring_pipeline(
     resume_id: str,
     job_id: str,
     prompt_id: str | None = None,
+    *,
+    max_pages: int | None = None,
+    page_fit: PageFitSettings | None = None,
+    max_bullets_per_entry: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], str, dict[str, Any]]:
     """Core tailoring pipeline for a single resume and job description.
 
@@ -2187,6 +2212,20 @@ async def execute_tailoring_pipeline(
     original_resume_data = _get_original_resume_data(resume)
     response_warnings: list[str] = []
     allow_appended_rows = False
+
+    if original_resume_data and (
+        page_fit is not None or max_bullets_per_entry is not None
+    ):
+        selection = await run_bullet_selection(
+            source_data=original_resume_data,
+            job_description=job["content"],
+            job_keywords=job_keywords,
+            max_per_entry=max_bullets_per_entry,
+            page_fit=page_fit,
+            max_pages=max_pages if max_pages is not None else 3,
+        )
+        original_resume_data = selection.data
+        response_warnings.extend(selection.warnings)
 
     # Diff-based improvement: generate targeted changes, apply with verification
     if original_resume_data:

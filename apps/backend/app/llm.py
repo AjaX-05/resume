@@ -1470,7 +1470,8 @@ def get_safe_max_tokens(
 
     fallback_limit = (
         DEFAULT_JSON_MAX_TOKENS
-        if config is not None and _uses_opencode_zen_hy3(config)
+        if config is not None
+        and (_uses_opencode_zen_hy3(config) or config.provider == "ollama")
         else FALLBACK_MAX_TOKENS
     )
     safe = min(safe_requested, fallback_limit)
@@ -1943,6 +1944,11 @@ async def complete_json(
             # no_think setting. Scope it to structured-output requests only.
             if _uses_opencode_zen_hy3(config):
                 kwargs["extra_body"] = {"reasoning_effort": "no_think"}
+            elif config.provider == "ollama":
+                # Qwen 3.8 / other Ollama thinking models default to medium
+                # thinking. That spends the JSON budget on a trace and the
+                # tailor preview gets empty or truncated JSON → HTTP 500.
+                kwargs["think"] = False
             else:
                 _apply_reasoning_effort(config, kwargs, reasoning_effort, max_tokens)
 

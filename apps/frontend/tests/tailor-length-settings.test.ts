@@ -13,8 +13,8 @@ const pageFit = { template: 'swiss-single', pageSize: 'A4' } as PageFitSettings;
 beforeEach(() => localStorage.clear());
 
 describe('tailor length settings', () => {
-  it('defaults to a two-page limit with no bullet cap', () => {
-    expect(DEFAULT_TAILOR_LENGTH).toEqual({ maxPages: 2, maxBulletsPerEntry: null });
+  it('defaults to a three-page limit with no bullet cap', () => {
+    expect(DEFAULT_TAILOR_LENGTH).toEqual({ maxPages: 3, maxBulletsPerEntry: null });
     expect(readTailorLength()).toEqual(DEFAULT_TAILOR_LENGTH);
   });
 

@@ -1,16 +1,19 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { ManageColumnsDialog } from '@/components/tracker/manage-columns-dialog';
+import { ManageColumnsDialog, columnLabel } from '@/components/tracker/manage-columns-dialog';
 import { KanbanBoard } from '@/components/tracker/kanban-board';
 import {
   APPLICATION_STATUS_ORDER,
   listApplications,
   type Application,
   type ApplicationColumns,
-  type ApplicationStatus,
 } from '@/lib/api/tracker';
-import { TRACKER_HIDDEN_STATUSES_KEY } from '@/lib/utils/tracker-column-visibility';
+import {
+  BOARD_COLUMN_ORDER,
+  TRACKER_HIDDEN_STATUSES_KEY,
+  type BoardColumnId,
+} from '@/lib/utils/tracker-column-visibility';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
@@ -27,11 +30,8 @@ vi.mock('@/lib/api/tracker', async () => {
   return { ...actual, listApplications: vi.fn() };
 });
 
-// Wraps (does not replace) the real dialog so the board's `onToggle` can be
-// invoked directly — the board must hold the "one visible column" invariant on
-// its own, not only because the dialog disables the switch.
 const boardDialog = vi.hoisted(() => ({
-  onToggle: null as ((status: string) => void) | null,
+  onToggle: null as ((columnId: string) => void) | null,
 }));
 
 vi.mock('@/components/tracker/manage-columns-dialog', async () => {
@@ -39,65 +39,80 @@ vi.mock('@/components/tracker/manage-columns-dialog', async () => {
     '@/components/tracker/manage-columns-dialog'
   );
   return {
+    columnLabel: actual.columnLabel,
     ManageColumnsDialog: (props: Parameters<typeof actual.ManageColumnsDialog>[0]) => {
-      boardDialog.onToggle = props.onToggle as (status: string) => void;
+      boardDialog.onToggle = props.onToggle as (columnId: string) => void;
       return React.createElement(actual.ManageColumnsDialog, props);
     },
   };
 });
 
-const ALL_BUT_SAVED = APPLICATION_STATUS_ORDER.filter((status) => status !== 'saved');
+const identityT = (key: string) => key;
+const LAST_JD: BoardColumnId = 'saved:Mid';
+const ALL_BUT_LAST_JD = BOARD_COLUMN_ORDER.filter((id) => id !== LAST_JD);
 
-function switchFor(status: ApplicationStatus): HTMLElement {
-  // The row label wraps the state description, so the switch is named "<stage><state>" (a space appears only where CSS makes the spans block).
+function switchFor(columnId: BoardColumnId): HTMLElement {
+  const label = columnLabel(columnId, identityT).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return screen.getByRole('switch', {
-    name: new RegExp(
-      `^tracker\\.columns\\.${status}\\s*tracker\\.manageDialog\\.(visible|hidden)$`
-    ),
+    name: new RegExp(`^${label}\\s*tracker\\.manageDialog\\.(visible|hidden)$`),
   });
 }
 
-function rowFor(status: ApplicationStatus): HTMLElement {
-  const row = switchFor(status).closest('div');
-  if (!row) throw new Error(`no row rendered for ${status}`);
+function rowFor(columnId: BoardColumnId): HTMLElement {
+  const row = switchFor(columnId).closest('div');
+  if (!row) throw new Error(`no row rendered for ${columnId}`);
   return row;
 }
 
-function visibleColumns(): string[] {
+function visibleLaneKeys(): string[] {
   return Array.from(document.querySelectorAll('[data-column]')).map(
     (el) => el.getAttribute('data-column') ?? ''
   );
 }
 
+function visibleColumns(): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const key of visibleLaneKeys()) {
+    const status = key.split(':')[0];
+    if (!status || seen.has(status)) continue;
+    seen.add(status);
+    out.push(status);
+  }
+  return out;
+}
+
 describe('ManageColumnsDialog', () => {
-  it('renders one switch per tracker status', () => {
+  it('renders one switch per JD seniority lane and every later stage', () => {
     render(
       <ManageColumnsDialog
         open
         onOpenChange={vi.fn()}
-        hiddenStatuses={new Set(['interview'])}
+        hiddenColumns={new Set(['interview'])}
         onToggle={vi.fn()}
       />
     );
 
-    expect(screen.getAllByRole('switch')).toHaveLength(7);
+    expect(screen.getAllByRole('switch')).toHaveLength(BOARD_COLUMN_ORDER.length);
+    expect(switchFor('saved:Entry')).toBeInTheDocument();
+    expect(switchFor('saved:Architect')).toBeInTheDocument();
   });
 
-  it('reports toggles with the status key', () => {
+  it('reports toggles with the column id, including JD-Senior', () => {
     const onToggle = vi.fn();
     render(
       <ManageColumnsDialog
         open
         onOpenChange={vi.fn()}
-        hiddenStatuses={new Set(['interview'])}
+        hiddenColumns={new Set()}
         onToggle={onToggle}
       />
     );
 
-    const interviewSwitch = switchFor('interview');
-    expect(interviewSwitch).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(switchFor('saved:Senior'));
+    expect(onToggle).toHaveBeenCalledWith('saved:Senior');
 
-    fireEvent.click(interviewSwitch);
+    fireEvent.click(switchFor('interview'));
     expect(onToggle).toHaveBeenCalledWith('interview');
   });
 
@@ -106,7 +121,7 @@ describe('ManageColumnsDialog', () => {
       <ManageColumnsDialog
         open
         onOpenChange={vi.fn()}
-        hiddenStatuses={new Set(['interview'])}
+        hiddenColumns={new Set(['interview'])}
         onToggle={vi.fn()}
       />
     );
@@ -116,46 +131,33 @@ describe('ManageColumnsDialog', () => {
     ).toBeInTheDocument();
     expect(within(rowFor('applied')).getByText('tracker.manageDialog.visible')).toBeInTheDocument();
     expect(screen.getAllByText('tracker.manageDialog.hidden')).toHaveLength(1);
-    expect(screen.getAllByText('tracker.manageDialog.visible')).toHaveLength(6);
+    expect(screen.getAllByText('tracker.manageDialog.visible')).toHaveLength(
+      BOARD_COLUMN_ORDER.length - 1
+    );
   });
 
-  it('locks the last visible stage and explains why', () => {
+  it('locks the last visible JD lane and explains why', () => {
     const onToggle = vi.fn();
     render(
       <ManageColumnsDialog
         open
         onOpenChange={vi.fn()}
-        hiddenStatuses={new Set(ALL_BUT_SAVED)}
+        hiddenColumns={new Set(ALL_BUT_LAST_JD)}
         onToggle={onToggle}
       />
     );
 
-    const lastVisible = switchFor('saved');
+    const lastVisible = switchFor(LAST_JD);
     expect(lastVisible).toBeDisabled();
     expect(screen.getAllByText('tracker.manageDialog.lastVisibleHint')).toHaveLength(1);
 
     fireEvent.click(lastVisible);
     expect(onToggle).not.toHaveBeenCalled();
 
-    // Hidden stages stay togglable so the board is always recoverable.
     const hiddenSwitch = switchFor('applied');
     expect(hiddenSwitch).not.toBeDisabled();
     fireEvent.click(hiddenSwitch);
     expect(onToggle).toHaveBeenCalledWith('applied');
-  });
-
-  it('shows no lock hint while two stages are visible', () => {
-    render(
-      <ManageColumnsDialog
-        open
-        onOpenChange={vi.fn()}
-        hiddenStatuses={new Set(ALL_BUT_SAVED.slice(1))}
-        onToggle={vi.fn()}
-      />
-    );
-
-    expect(screen.queryByText('tracker.manageDialog.lastVisibleHint')).not.toBeInTheDocument();
-    expect(switchFor('saved')).not.toBeDisabled();
   });
 });
 
@@ -169,7 +171,7 @@ describe('KanbanBoard column visibility', () => {
     company: 'ACME',
     role: 'Engineer',
     applied_at: null,
-    notes: null,
+    notes: 'Seniority: Mid',
     position: 0,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -186,7 +188,7 @@ describe('KanbanBoard column visibility', () => {
 
   async function renderBoard() {
     render(<KanbanBoard />);
-    await waitFor(() => expect(visibleColumns().length).toBeGreaterThan(0));
+    await waitFor(() => expect(visibleLaneKeys().length).toBeGreaterThan(0));
   }
 
   beforeEach(() => {
@@ -196,7 +198,6 @@ describe('KanbanBoard column visibility', () => {
   });
 
   it('does not write the stored selection back on mount', async () => {
-    // Deliberately non-canonical order: a mount-time persist would rewrite it.
     const stored = JSON.stringify(['rejected', 'interview']);
     localStorage.setItem(TRACKER_HIDDEN_STATUSES_KEY, stored);
 
@@ -208,7 +209,21 @@ describe('KanbanBoard column visibility', () => {
     );
   });
 
-  it('persists a stage the user actually hides', async () => {
+  it('hides a single JD seniority lane without hiding the others', async () => {
+    await renderBoard();
+
+    fireEvent.click(screen.getByRole('button', { name: 'tracker.manage' }));
+    fireEvent.click(switchFor('saved:Mid'));
+
+    expect(JSON.parse(localStorage.getItem(TRACKER_HIDDEN_STATUSES_KEY) ?? '[]')).toEqual([
+      'saved:Mid',
+    ]);
+    expect(visibleLaneKeys()).not.toContain('saved:Mid');
+    expect(visibleLaneKeys()).toContain('saved:Senior');
+    expect(visibleLaneKeys()).toContain('applied');
+  });
+
+  it('persists a later stage the user actually hides', async () => {
     await renderBoard();
 
     fireEvent.click(screen.getByRole('button', { name: 'tracker.manage' }));
@@ -217,24 +232,23 @@ describe('KanbanBoard column visibility', () => {
     expect(localStorage.getItem(TRACKER_HIDDEN_STATUSES_KEY)).toBe(JSON.stringify(['applied']));
     expect(visibleColumns()).not.toContain('applied');
 
-    // ...and un-hiding round-trips back to an empty selection.
     fireEvent.click(switchFor('applied'));
     expect(localStorage.getItem(TRACKER_HIDDEN_STATUSES_KEY)).toBe(JSON.stringify([]));
     expect(visibleColumns()).toContain('applied');
   });
 
-  it('refuses to hide the last visible stage even when the dialog is bypassed', async () => {
-    const stored = JSON.stringify(ALL_BUT_SAVED);
+  it('refuses to hide the last visible lane even when the dialog is bypassed', async () => {
+    const stored = JSON.stringify(ALL_BUT_LAST_JD);
     localStorage.setItem(TRACKER_HIDDEN_STATUSES_KEY, stored);
 
     await renderBoard();
-    expect(visibleColumns()).toEqual(['saved']);
+    expect(visibleLaneKeys()).toEqual(['saved:Mid']);
 
     const toggle = boardDialog.onToggle;
     expect(toggle).toBeTypeOf('function');
-    act(() => toggle?.('saved'));
+    act(() => toggle?.(LAST_JD));
 
-    expect(visibleColumns()).toEqual(['saved']);
+    expect(visibleLaneKeys()).toEqual(['saved:Mid']);
     expect(localStorage.getItem(TRACKER_HIDDEN_STATUSES_KEY)).toBe(stored);
   });
 });

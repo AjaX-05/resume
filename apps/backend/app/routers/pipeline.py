@@ -10,6 +10,7 @@ from app.services.pipeline_service import (
     bulk_apply,
     bulk_tailor,
     detect_ats_for_applications,
+    eligible_tailored_ids,
     get_task,
     list_tasks,
     load_config,
@@ -25,7 +26,7 @@ class BulkTailorRequest(BaseModel):
     application_ids: list[str] = Field(min_length=1, max_length=50)
     master_resume_id: str
     prompt_id: str | None = None
-    rate_limit_seconds: float = Field(default=5.0, ge=0, le=60)
+    rate_limit_seconds: float = Field(default=10.0, ge=0, le=60)
 
 
 class BulkApplyRequest(BaseModel):
@@ -38,6 +39,7 @@ class PipelineConfig(BaseModel):
     approval_gate: bool = True
     master_resume_id: str = ""
     tailor_prompt_id: str = "full"
+    apply_task_id: str | None = None
 
 
 class AtsDetectRequest(BaseModel):
@@ -138,11 +140,45 @@ async def tasks_list() -> list[dict[str, Any]]:
 async def get_pipeline_config() -> PipelineConfig:
     """Get the pipeline automation config (auto_tailor, auto_apply, gate)."""
     cfg = load_config()
-    return PipelineConfig(**cfg)
+    return PipelineConfig(
+        auto_tailor=bool(cfg.get("auto_tailor", False)),
+        auto_apply=bool(cfg.get("auto_apply", False)),
+        approval_gate=bool(cfg.get("approval_gate", True)),
+        master_resume_id=str(cfg.get("master_resume_id") or ""),
+        tailor_prompt_id=str(cfg.get("tailor_prompt_id") or "full"),
+    )
 
 
 @router.put("/config", response_model=PipelineConfig)
 async def update_pipeline_config(cfg: PipelineConfig) -> PipelineConfig:
-    """Update pipeline automation toggles."""
-    save_config(cfg.model_dump())
-    return cfg
+    """Update pipeline automation toggles.
+
+    Turning Auto-Apply ON queues every currently-Tailored card (resume +
+    supported ATS) one at a time. The returned ``apply_task_id`` is what the
+    tracker polls for the review/progress modal.
+    """
+    current = load_config()
+    was_auto_apply = bool(current.get("auto_apply", False))
+    save_config(
+        {
+            "auto_tailor": cfg.auto_tailor,
+            "auto_apply": cfg.auto_apply,
+            "approval_gate": cfg.approval_gate,
+            "master_resume_id": cfg.master_resume_id,
+            "tailor_prompt_id": cfg.tailor_prompt_id,
+        }
+    )
+    apply_task_id: str | None = None
+    if cfg.auto_apply and not was_auto_apply:
+        ids = await eligible_tailored_ids()
+        if ids:
+            task = await bulk_apply(ids)
+            apply_task_id = task.task_id
+    return PipelineConfig(
+        auto_tailor=cfg.auto_tailor,
+        auto_apply=cfg.auto_apply,
+        approval_gate=cfg.approval_gate,
+        master_resume_id=cfg.master_resume_id,
+        tailor_prompt_id=cfg.tailor_prompt_id,
+        apply_task_id=apply_task_id,
+    )

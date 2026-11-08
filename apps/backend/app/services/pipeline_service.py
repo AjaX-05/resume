@@ -29,6 +29,11 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from app.database import db
+from app.services.apply_urls import (
+    canonical_apply_url,
+    effective_apply_url,
+    extract_listed_apply_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +45,7 @@ _CONFIG_PATH = Path(__file__).parents[2] / "data" / "pipeline.json"
 # ────────────────────────────────────────────────────────────────────────────
 
 SUPPORTED_ATS: dict[str, list[str]] = {
-    "greenhouse":      ["greenhouse.io", "grnh.se"],
+    "greenhouse":      ["greenhouse.io", "grnh.se", "careerpuck.com"],
     "ashby":           ["ashbyhq.com"],
     "lever":           ["lever.co"],
     "workable":        ["workable.com"],
@@ -49,10 +54,11 @@ SUPPORTED_ATS: dict[str, list[str]] = {
     "rippling":        ["ats.rippling.com", "recruiting.rippling.com"],
     "smartrecruiters": ["smartrecruiters.com"],
     "bamboohr":        ["bamboohr.com"],
+    "workday":         ["myworkdayjobs.com"],
+    "email":           ["mailto:", "privateai.com/jobs"],
 }
 
 UNSUPPORTED_ATS: dict[str, list[str]] = {
-    "workday":   ["myworkdayjobs.com", "workday.com"],
     "icims":     ["icims.com"],
     "jobvite":   ["jobvite.com"],
     "linkedin":  ["linkedin.com"],
@@ -77,6 +83,7 @@ def detect_ats(apply_url: str) -> tuple[str, bool]:
     """
     if not apply_url:
         return ("none", False)
+    apply_url = canonical_apply_url(apply_url)
     url_lower = apply_url.lower()
     for ats, patterns in SUPPORTED_ATS.items():
         if any(p in url_lower for p in patterns):
@@ -91,22 +98,252 @@ def detect_ats(apply_url: str) -> tuple[str, bool]:
     return ("unknown", False)
 
 
+def card_fingerprint(company: str | None, role: str | None) -> str:
+    """Stable identity for a tracker card: company + role, ignoring title clutter.
+
+    "Senior AI Engineer @ Omnicom" with company Omnicom is the same job as
+    "Senior AI Engineer" at Omnicom. Empty / unknown cards return "" so they
+    are never collapsed together.
+    """
+    company_key = (company or "").strip().lower()
+    role_key = " ".join((role or "").split()).lower()
+    if company_key:
+        for sep in (" @ ", " at "):
+            suffix = f"{sep}{company_key}"
+            if role_key.endswith(suffix):
+                role_key = role_key[: -len(suffix)].strip()
+                break
+    elif role_key:
+        for sep in (" @ ", " at "):
+            if sep in role_key:
+                left, right = role_key.rsplit(sep, 1)
+                role_key, company_key = left.strip(), right.strip()
+                break
+    if not company_key and not role_key:
+        return ""
+    return f"{company_key}::{role_key}"
+
+
 def extract_apply_url(notes: str, job_content: str = "") -> str:
-    """Extract the apply URL stored by the scraper from notes/content."""
-    import re
-    if not notes:
-        notes = ""
-    if not job_content:
-        job_content = ""
-    # Notes format: "Apply: https://..."
-    m = re.search(r"^\s*Apply:\s*(https?://\S+)", notes, re.MULTILINE)
-    if m:
-        return m.group(1).strip()
-    # Fallback: look in job_content for "**Apply:** URL" or any apply URL
-    m = re.search(r"\*\*Apply:\*\*\s*(https?://\S+)", job_content)
-    if m:
-        return m.group(1).strip()
-    return ""
+    """Extract the listed Apply: URL (Jobright/ATS) from notes/content."""
+    return extract_listed_apply_url(notes, job_content)
+
+
+def _is_clone_card(app: dict[str, Any]) -> bool:
+    """Auto-created Tailored clones have no apply URL / posted-time notes."""
+    return not extract_apply_url(app.get("notes") or "")
+
+
+async def attach_tailored_resume(
+    *,
+    tailored_resume_id: str,
+    master_resume_id: str | None,
+    job_id: str | None,
+    application_id: str | None = None,
+    company: str | None = None,
+    role: str | None = None,
+) -> str | None:
+    """Move the original JD card into Tailored. Never leave a clone behind.
+
+    Prefers the saved card that still has the apply URL and posted time so
+    Tailored shows the same posting metadata. Empty auto-created clones
+    (NO URL / Role @ Company) are deleted.
+    """
+    apps = await db.list_applications()
+    fingerprint = card_fingerprint(company, role)
+
+    def same_job(app: dict[str, Any]) -> bool:
+        return bool(job_id) and app.get("job_id") == job_id
+
+    def same_fp(app: dict[str, Any]) -> bool:
+        return bool(fingerprint) and card_fingerprint(
+            app.get("company"), app.get("role")
+        ) == fingerprint
+
+    target: dict[str, Any] | None = None
+    if application_id:
+        target = next(
+            (app for app in apps if app["application_id"] == application_id), None
+        )
+    if target is None:
+        saved = [
+            app
+            for app in apps
+            if app.get("status") == "saved" and (same_job(app) or same_fp(app))
+        ]
+        saved.sort(
+            key=lambda app: (
+                0 if extract_apply_url(app.get("notes") or "") else 1,
+                app.get("created_at") or "",
+            )
+        )
+        target = saved[0] if saved else None
+    if target is None:
+        existing = [app for app in apps if same_job(app)]
+        target = existing[0] if existing else None
+
+    if target is None:
+        if not job_id:
+            return None
+        created = await db.create_application(
+            job_id=job_id,
+            resume_id=tailored_resume_id,
+            master_resume_id=master_resume_id,
+            status="applied",
+            company=company,
+            role=role,
+        )
+        return created.get("application_id")
+
+    target_id = target["application_id"]
+    target_url = extract_apply_url(target.get("notes") or "")
+    company_key = (company or target.get("company") or "").strip().lower()
+    for extra in apps:
+        extra_id = extra["application_id"]
+        if extra_id == target_id:
+            continue
+        extra_url = extract_apply_url(extra.get("notes") or "")
+        extra_company = (extra.get("company") or "").strip().lower()
+        drop_clone = extra.get("status") == "applied" and _is_clone_card(extra) and (
+            same_job(extra)
+            or same_fp(extra)
+            or (bool(application_id) and bool(company_key) and extra_company == company_key)
+        )
+        drop_dup_jd = (
+            extra.get("status") == "saved"
+            and (same_fp(extra) or same_job(extra))
+            and (not extra_url or extra_url == target_url)
+        )
+        if not (drop_clone or drop_dup_jd):
+            continue
+        try:
+            await db.delete_application(extra_id)
+        except Exception:
+            logger.warning("Could not delete tailored clone %s", extra_id)
+
+    try:
+        await db.update_application(
+            target_id,
+            {"status": "applied", "resume_id": tailored_resume_id},
+        )
+    except Exception as exc:
+        logger.warning("Failed to move JD card %s into Tailored: %s", target_id, exc)
+    return target_id
+
+
+def _role_stem(company: str | None, role: str | None) -> str:
+    """Company + role with title clutter stripped, for matching JD vs clone cards.
+
+    "AI Engineer 5 (Gen AI SDK: …)" and "AI Engineer 5 (Gen AI SDK) @ Capital One"
+    collapse to the same stem so a Tailored clone can reclaim its JD card.
+    """
+    fingerprint = card_fingerprint(company, role)
+    if not fingerprint:
+        return ""
+    company_key, part = fingerprint.split("::", 1)
+    cut = len(part)
+    for sep in (" (", ",", ":", " — ", " - "):
+        idx = part.find(sep)
+        if 0 < idx < cut:
+            cut = idx
+    return f"{company_key}::{part[:cut].strip()}"
+
+
+async def collapse_tailored_clones() -> int:
+    """If a JD is still in Saved but a clone sits in Tailored, merge them.
+
+    Returns how many JD cards were moved. Safe to call on tracker load.
+    """
+    apps = await db.list_applications()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for app in apps:
+        stem = _role_stem(app.get("company"), app.get("role"))
+        if stem:
+            groups.setdefault(stem, []).append(app)
+
+    moved = 0
+    seen_ids: set[str] = set()
+    for cards in groups.values():
+        saved = [app for app in cards if app.get("status") == "saved"]
+        applied = [app for app in cards if app.get("status") == "applied"]
+        if not saved or not applied:
+            continue
+        donor = max(applied, key=lambda app: app.get("updated_at") or "")
+        target = next(
+            (app for app in saved if extract_apply_url(app.get("notes") or "")),
+            saved[0],
+        )
+        if target["application_id"] in seen_ids:
+            continue
+        result = await attach_tailored_resume(
+            tailored_resume_id=donor["resume_id"],
+            master_resume_id=donor.get("master_resume_id") or target.get("master_resume_id"),
+            job_id=target.get("job_id") or donor.get("job_id"),
+            application_id=target["application_id"],
+            company=target.get("company") or donor.get("company"),
+            role=target.get("role") or donor.get("role"),
+        )
+        if result:
+            seen_ids.add(target["application_id"])
+            moved += 1
+
+    # Fallback: one leftover JD and one NO-URL clone at the same company
+    # (LLM titles like "The job title is …" won't share a role stem).
+    remaining = await db.list_applications()
+    by_company: dict[str, list[dict[str, Any]]] = {}
+    for app in remaining:
+        company_key = (app.get("company") or "").strip().lower()
+        if company_key:
+            by_company.setdefault(company_key, []).append(app)
+    for cards in by_company.values():
+        saved = [app for app in cards if app.get("status") == "saved"]
+        clones = [
+            app
+            for app in cards
+            if app.get("status") == "applied" and _is_clone_card(app)
+        ]
+        if len(saved) != 1 or len(clones) != 1:
+            continue
+        target, donor = saved[0], clones[0]
+        if target["application_id"] in seen_ids:
+            continue
+        result = await attach_tailored_resume(
+            tailored_resume_id=donor["resume_id"],
+            master_resume_id=donor.get("master_resume_id") or target.get("master_resume_id"),
+            job_id=target.get("job_id") or donor.get("job_id"),
+            application_id=target["application_id"],
+            company=target.get("company") or donor.get("company"),
+            role=target.get("role") or donor.get("role"),
+        )
+        if result:
+            seen_ids.add(target["application_id"])
+            moved += 1
+
+    remaining = await db.list_applications()
+    by_company = {}
+    for app in remaining:
+        company_key = (app.get("company") or "").strip().lower()
+        if company_key:
+            by_company.setdefault(company_key, []).append(app)
+    for cards in by_company.values():
+        noted = [
+            app
+            for app in cards
+            if app.get("status") == "applied" and not _is_clone_card(app)
+        ]
+        clones = [
+            app
+            for app in cards
+            if app.get("status") == "applied" and _is_clone_card(app)
+        ]
+        if not noted or not clones:
+            continue
+        for clone in clones:
+            try:
+                await db.delete_application(clone["application_id"])
+            except Exception:
+                logger.warning("Could not delete leftover clone %s", clone["application_id"])
+    return moved
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -122,12 +359,16 @@ def load_config() -> dict[str, Any]:
         "approval_gate": True,
         "master_resume_id": "",
         "tailor_prompt_id": "full",
+        "tailor_max_pages": 3,
+        "tailor_rate_limit_seconds": 10.0,
     }
 
 
 def save_config(config: dict[str, Any]) -> None:
     _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    merged = load_config()
+    merged.update(config)
+    _CONFIG_PATH.write_text(json.dumps(merged, indent=2), encoding="utf-8")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -159,6 +400,7 @@ class PipelineTask:
     items: list[PipelineItem] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: str | None = None
+    follow_up_task_id: str | None = None
 
     def summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
@@ -171,6 +413,7 @@ class PipelineTask:
             "counts": counts,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
+            "follow_up_task_id": self.follow_up_task_id,
             "items": [asdict(it) for it in self.items],
         }
 
@@ -197,16 +440,28 @@ async def bulk_tailor(
     application_ids: list[str],
     master_resume_id: str,
     prompt_id: str | None = None,
-    rate_limit_seconds: float = 5.0,
+    rate_limit_seconds: float = 10.0,
 ) -> PipelineTask:
     """Queue a tailor job for each supported application.
 
-    Returns a PipelineTask tracking the batch. Items with unsupported ATS or
-    no apply URL are marked `skipped` upfront to save LLM credits.
+    The queue worker runs these **one at a time** (oldest first) with a
+    cooldown between items so a local LLM is never asked to tailor 10 JDs
+    in parallel. Items with unsupported ATS, no apply URL, or a duplicate
+    company+role (already tailored or already in this batch) are marked
+    `skipped` upfront.
     """
     task = PipelineTask(task_id=f"tailor-{uuid4().hex[:8]}", kind="tailor")
     config = load_config()
     prompt = prompt_id or config.get("tailor_prompt_id", "full")
+
+    existing = await db.list_applications()
+    already_tailored = {
+        card_fingerprint(a.get("company"), a.get("role"))
+        for a in existing
+        if a.get("status") == "applied"
+        and card_fingerprint(a.get("company"), a.get("role"))
+    }
+    seen_in_batch: set[str] = set()
 
     for app_id in application_ids:
         app = await db.get_application(app_id)
@@ -221,6 +476,25 @@ async def bulk_tailor(
             role=app.get("role", "") or "",
             ats=ats,
         )
+        fingerprint = card_fingerprint(item.company, item.role)
+
+        if app.get("status") == "applied":
+            item.status = "skipped"
+            item.error = "Already tailored"
+            task.items.append(item)
+            continue
+
+        if fingerprint and fingerprint in already_tailored:
+            item.status = "skipped"
+            item.error = "Duplicate of an already-tailored card"
+            task.items.append(item)
+            continue
+
+        if fingerprint and fingerprint in seen_in_batch:
+            item.status = "skipped"
+            item.error = "Duplicate in this batch"
+            task.items.append(item)
+            continue
 
         if not supported:
             item.status = "skipped"
@@ -247,10 +521,14 @@ async def bulk_tailor(
                 job_req_id="",
                 rate_limit_seconds=rate_limit_seconds,
                 prompt_id=prompt,
+                job_id=app.get("job_id"),
+                application_id=app_id,
             )
             item.queue_item_id = queue_item_id
             item.status = "queued"
             _queue_item_to_pipeline[queue_item_id] = (task.task_id, app_id)
+            if fingerprint:
+                seen_in_batch.add(fingerprint)
         except Exception as e:
             item.status = "failed"
             item.error = f"Queue failed: {str(e)[:100]}"
@@ -269,6 +547,24 @@ async def bulk_tailor(
     return task
 
 
+def on_queue_item_started(item_id: str) -> None:
+    """Called by the queue worker as it claims the next pipeline item.
+
+    Flips that row from `queued` → `tailoring` so the tracker progress
+    modal can show which JD the local model is working on right now.
+    """
+    entry = _queue_item_to_pipeline.get(item_id)
+    if not entry:
+        return
+    task_id, _app_id = entry
+    task = _tasks.get(task_id)
+    if not task:
+        return
+    item = next((i for i in task.items if i.queue_item_id == item_id), None)
+    if item and item.status == "queued":
+        item.status = "tailoring"
+
+
 async def on_queue_item_completed(
     item_id: str,
     tailored_resume_id: str | None,
@@ -277,61 +573,78 @@ async def on_queue_item_completed(
     """Called by queue_worker when a queue item finishes.
 
     Updates the matching PipelineItem + the Application card:
-      - On success: card's resume_id → tailored_resume_id, status → 'applied' (Tailored col)
-      - On failure: PipelineItem stays "failed", card unchanged
+      - On success: original JD card moves to Tailored (notes/posted time kept)
+      - On failure: PipelineItem is "failed", JD card stays in Saved so the
+        rest of the batch can keep running
     """
     entry = _queue_item_to_pipeline.get(item_id)
-    if not entry:
-        return  # not a pipeline-managed queue item
-    task_id, app_id = entry
-    task = _tasks.get(task_id)
-    if not task:
-        return
-    item = next((i for i in task.items if i.queue_item_id == item_id), None)
-    if not item:
-        return
+    queued = await db.get_queue_item(item_id)
+    task: PipelineTask | None = None
+    item: PipelineItem | None = None
+    app_id = (queued or {}).get("application_id")
+    if entry:
+        task_id, mapped_app_id = entry
+        app_id = app_id or mapped_app_id
+        task = _tasks.get(task_id)
+        if task:
+            item = next((row for row in task.items if row.queue_item_id == item_id), None)
 
     if error or not tailored_resume_id:
-        item.status = "failed"
-        item.error = error or "Unknown tailor failure"
-        _check_task_complete(task)
+        if item:
+            item.status = "failed"
+            item.error = error or "Unknown tailor failure"
+        if task:
+            await _finish_tailor_if_done(task)
         return
 
-    # Link the application card to the newly tailored resume
-    item.tailored_resume_id = tailored_resume_id
-    item.status = "tailored"
+    if item:
+        item.tailored_resume_id = tailored_resume_id
+        item.status = "tailored"
+
     try:
-        await db.update_application(
-            app_id,
-            {"status": "applied", "resume_id": tailored_resume_id},
+        await attach_tailored_resume(
+            tailored_resume_id=tailored_resume_id,
+            master_resume_id=(queued or {}).get("resume_id"),
+            job_id=(queued or {}).get("job_id"),
+            application_id=app_id,
+            company=(queued or {}).get("company") or (item.company if item else None),
+            role=(queued or {}).get("role") or (item.role if item else None),
         )
-    except Exception as e:
-        logger.warning(f"Failed to link app {app_id} to resume {tailored_resume_id}: {e}")
+    except Exception as exc:
+        logger.warning(
+            "Failed to link app %s to resume %s: %s",
+            app_id,
+            tailored_resume_id,
+            exc,
+        )
+        if item:
+            item.status = "failed"
+            item.error = "Could not move JD card"
+            # Resume exists; do not fail the rest of the batch.
 
-    _check_task_complete(task)
+    if task:
+        await _finish_tailor_if_done(task)
 
-    # If auto_apply is on, kick off apply for this card
+
+async def _finish_tailor_if_done(task: PipelineTask) -> None:
+    """Close a tailor batch once every item is terminal, then chain auto-apply."""
+    if task.kind != "tailor" or task.completed_at:
+        if task.kind != "tailor":
+            _check_task_complete(task)
+        return
+    tailor_done = {"tailored", "failed", "skipped"}
+    if not all(row.status in tailor_done for row in task.items):
+        return
     config = load_config()
     if config.get("auto_apply", False):
-        try:
-            from app.services.applier_service import start_application
-            from app.pdf import render_resume_pdf
-            from app.schemas.models import PageFitSettings
-            from app.services.page_fit import resume_print_url
-
-            fit = PageFitSettings()
-            url = resume_print_url(tailored_resume_id, fit)
-            pdf_bytes = await render_resume_pdf(url)
-
-            # Need the apply URL for this card
-            app = await db.get_application(app_id)
-            if app:
-                apply_url = extract_apply_url(app.get("notes", ""), app.get("job_content", ""))
-                if apply_url:
-                    start_application(app_id, apply_url, pdf_bytes)
-                    item.status = "applying"
-        except Exception as e:
-            logger.warning(f"Auto-apply trigger failed for {app_id}: {e}")
+        apply_ids = [row.application_id for row in task.items if row.status == "tailored"]
+        if apply_ids:
+            try:
+                apply_task = await bulk_apply(apply_ids)
+                task.follow_up_task_id = apply_task.task_id
+            except Exception as exc:
+                logger.warning("Auto-apply after tailor failed to start: %s", exc)
+    task.completed_at = datetime.now(timezone.utc).isoformat()
 
 
 def _check_task_complete(task: PipelineTask) -> None:
@@ -345,17 +658,30 @@ def _check_task_complete(task: PipelineTask) -> None:
 # BULK APPLY
 # ────────────────────────────────────────────────────────────────────────────
 
+async def eligible_tailored_ids() -> list[str]:
+    """Tailored cards (status=applied) that have a resume and a supported ATS."""
+    ids: list[str] = []
+    for app in await db.list_applications():
+        if app.get("status") != "applied":
+            continue
+        if not app.get("resume_id"):
+            continue
+        apply_url = extract_apply_url(app.get("notes") or "", app.get("job_content") or "")
+        _ats, supported = detect_ats(apply_url)
+        if supported:
+            ids.append(app["application_id"])
+    return ids
+
+
 async def bulk_apply(application_ids: list[str]) -> PipelineTask:
-    """Start Playwright apply sessions for each supported application.
+    """Queue Playwright apply sessions one at a time.
 
-    Items are started sequentially (not in parallel) to avoid Chromium
-    resource exhaustion and to make human review (if gated) manageable.
+    The function returns immediately with a task_id to poll. A background
+    worker starts the next Chromium session only after the previous one
+    settles (submitted / failed / cancelled), so the local machine is never
+    asked to run ten browsers plus the LLM at once. If approval_gate is on,
+    "settled" includes waiting for the user to approve or reject the form.
     """
-    from app.pdf import render_resume_pdf
-    from app.schemas.models import PageFitSettings
-    from app.services.applier_service import start_application
-    from app.services.page_fit import resume_print_url
-
     task = PipelineTask(task_id=f"apply-{uuid4().hex[:8]}", kind="apply")
 
     for app_id in application_ids:
@@ -363,47 +689,113 @@ async def bulk_apply(application_ids: list[str]) -> PipelineTask:
         if not app:
             continue
 
-        apply_url = extract_apply_url(app.get("notes", ""), app.get("job_content", ""))
-        ats, supported = detect_ats(apply_url)
+        listed_url = extract_apply_url(app.get("notes", ""), app.get("job_content", ""))
+        apply_url = effective_apply_url(app.get("notes", "") or "", app.get("job_content", "") or "")
+        ats, supported = detect_ats(apply_url or listed_url)
 
         item = PipelineItem(
             application_id=app_id,
             company=app.get("company", "") or "",
             role=app.get("role", "") or "",
             ats=ats,
+            tailored_resume_id=app.get("resume_id") or None,
         )
 
-        if not supported:
+        if not apply_url and not listed_url:
             item.status = "skipped"
-            item.error = f"ATS not supported ({ats})"
-            task.items.append(item)
-            continue
-
-        resume_id = app.get("resume_id", "")
-        if not resume_id:
+            item.error = "No apply URL on card"
+        elif not app.get("resume_id"):
             item.status = "failed"
             item.error = "No resume on card — tailor first"
-            task.items.append(item)
-            continue
+        else:
+            # Queue even Workday/iCIMS: the applier opens the employer page for
+            # review instead of skipping. Autofill adapters still only run for
+            # Greenhouse/Lever/Ashby/etc.
+            item.status = "queued"
+            if not supported:
+                item.ats = ats
 
-        try:
-            fit = PageFitSettings()
-            url = resume_print_url(resume_id, fit)
-            pdf_bytes = await render_resume_pdf(url)
-            session = start_application(app_id, apply_url, pdf_bytes)
-            item.status = "applying"
-            task.items.append(item)
-        except Exception as e:
-            item.status = "failed"
-            item.error = f"Apply start failed: {str(e)[:100]}"
-            task.items.append(item)
-            continue
-
-        # Wait briefly between launches so Playwright instances don't fight
-        await asyncio.sleep(2)
+        task.items.append(item)
 
     _tasks[task.task_id] = task
+    if any(item.status == "queued" for item in task.items):
+        asyncio.create_task(_run_apply_batch(task), name=f"apply-batch-{task.task_id}")
+    else:
+        task.completed_at = datetime.now(timezone.utc).isoformat()
     return task
+
+
+async def _run_apply_batch(task: PipelineTask) -> None:
+    """Drive one apply session at a time for ``task``."""
+    from app.pdf import render_resume_pdf
+    from app.schemas.models import PageFitSettings
+    from app.services.applier_service import (
+        get_session as get_apply_session,
+        prepare_vault,
+        start_application,
+    )
+    from app.services.page_fit import resume_print_url
+
+    for item in task.items:
+        if item.status != "queued":
+            continue
+        app = await db.get_application(item.application_id)
+        if not app:
+            item.status = "failed"
+            item.error = "Card disappeared"
+            continue
+        notes = app.get("notes", "") or ""
+        apply_url = effective_apply_url(notes, app.get("job_content", "") or "")
+        resume_id = app.get("resume_id") or ""
+        try:
+            vault = await prepare_vault(resume_id)
+            fit = PageFitSettings()
+            pdf_bytes = await render_resume_pdf(resume_print_url(resume_id, fit))
+            start_application(
+                item.application_id,
+                apply_url,
+                pdf_bytes,
+                vault=vault,
+                company=app.get("company") or "",
+                role=app.get("role") or "",
+                notes=notes,
+            )
+            item.status = "applying"
+            await _wait_for_apply_session(item.application_id)
+            session = get_apply_session(item.application_id)
+            if session:
+                mapped = {
+                    "submitted": "applied",
+                    "failed": "failed",
+                    "cancelled": "skipped",
+                    "needs_review": "needs_review",
+                    "filling": "applying",
+                    "pending": "applying",
+                    "submitting": "applying",
+                }.get(session.status, item.status)
+                item.status = mapped  # type: ignore[assignment]
+                if session.error:
+                    item.error = session.error
+        except Exception as exc:
+            item.status = "failed"
+            item.error = f"Apply start failed: {str(exc)[:100]}"
+            logger.warning("Apply item %s failed: %s", item.application_id, exc)
+
+    _check_task_complete(task)
+
+
+async def _wait_for_apply_session(application_id: str, timeout_seconds: float = 900) -> None:
+    """Block until this apply session is terminal (or the review timeout fires)."""
+    from app.services.applier_service import get_session as get_apply_session
+
+    terminal = {"submitted", "failed", "cancelled"}
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while loop.time() < deadline:
+        session = get_apply_session(application_id)
+        if not session or session.status in terminal:
+            return
+        await asyncio.sleep(1)
 
 
 async def refresh_apply_task_statuses(task_id: str) -> PipelineTask | None:

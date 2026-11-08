@@ -871,7 +871,8 @@
       "rateLimit": "Limite de débit atteinte. Attendez environ une minute et réessayez.",
       "failedToGenerate": "Impossible de générer le CV. Vérifiez votre clé API dans les paramètres, puis réessayez.",
       "timeout": "L'aperçu du CV a expiré après {minutes} minutes. Réessayez avec une fiche de poste plus courte ou une consigne plus simple.",
-      "failedToPreview": "Impossible de prévisualiser le CV. Vérifiez votre clé API dans les paramètres, puis réessayez.",
+      "failedToPreview": "Impossible de prévisualiser le CV. Avec un modèle local, raccourcissez l’offre ou utilisez une consigne plus simple.",
+      "localModelJson": "Le modèle local n’a pas renvoyé un CV adapté complet. Réessayez, raccourcissez l’offre ou utilisez une consigne plus simple.",
       "failedToConfirm": "Impossible d'appliquer les modifications. Veuillez réessayer.",
       "previewUnavailable": "Cet aperçu a expiré ou le CV source a changé. Générez un nouvel aperçu avant de sauvegarder."
     },
@@ -1462,6 +1463,9 @@
       "sharedResume": "CV partagé",
       "selectAria": "Sélectionner la candidature",
       "dragAria": "Faire glisser pour réorganiser"
+    },
+    "column": {
+      "selectAll": "Tout sélectionner {title}"
     },
     "modal": {
       "jobDescription": "Fiche de poste",

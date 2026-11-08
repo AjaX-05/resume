@@ -61,6 +61,7 @@ export async function rejectApply(application_id: string): Promise<ApplySession>
 
 export async function getVault(): Promise<Record<string, unknown>> {
   const res = await apiFetch('/applier/vault');
+  if (!res.ok) throw new Error(`Vault load failed (${res.status})`);
   return res.json();
 }
 
@@ -68,5 +69,6 @@ export async function updateVault(
   vault: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   const res = await apiPut('/applier/vault', vault);
+  if (!res.ok) throw new Error(`Vault save failed (${res.status})`);
   return res.json();
 }

@@ -318,6 +318,7 @@ class Database:
             "error": row.error,
             "rate_limit_seconds": row.rate_limit_seconds,
             "prompt_id": row.prompt_id,
+            "application_id": row.application_id,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -1559,6 +1560,8 @@ class Database:
         job_req_id: str = "",
         rate_limit_seconds: float = 5.0,
         prompt_id: str | None = None,
+        job_id: str | None = None,
+        application_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist one pending tailoring request."""
         now = _now()
@@ -1572,6 +1575,8 @@ class Database:
             status="pending",
             rate_limit_seconds=rate_limit_seconds,
             prompt_id=prompt_id,
+            job_id=job_id,
+            application_id=application_id,
             created_at=now,
             updated_at=now,
         )

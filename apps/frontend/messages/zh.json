@@ -871,7 +871,8 @@
       "rateLimit": "已达到速率限制。请等待约一分钟后重试。",
       "timeout": "简历预览在 {minutes} 分钟后超时。请缩短职位描述，或改用更简单的提示词后重试。",
       "failedToGenerate": "无法生成简历。请在设置中检查 API 密钥后重试。",
-      "failedToPreview": "无法预览简历。请在设置中检查 API 密钥后重试。",
+      "failedToPreview": "无法预览简历。如果使用本地模型，请缩短职位描述或换用更简单的提示后再试。",
+      "localModelJson": "本地模型未能返回完整的定制简历。请重试，缩短职位描述，或换用更简单的提示。",
       "failedToConfirm": "无法应用更改。请重试。",
       "previewUnavailable": "此预览已过期或原始简历已更改。请先生成新的预览再保存。"
     },
@@ -1462,6 +1463,9 @@
       "sharedResume": "共享简历",
       "selectAria": "选择申请",
       "dragAria": "拖动以重新排序"
+    },
+    "column": {
+      "selectAll": "全选 {title}"
     },
     "modal": {
       "jobDescription": "职位描述",

@@ -29,6 +29,7 @@ export interface PipelineTask {
   counts: Record<string, number>;
   created_at: string;
   completed_at: string | null;
+  follow_up_task_id?: string | null;
   items: PipelineItem[];
 }
 
@@ -38,6 +39,7 @@ export interface PipelineConfig {
   approval_gate: boolean;
   master_resume_id: string;
   tailor_prompt_id: string;
+  apply_task_id?: string | null;
 }
 
 export interface AtsInfo {
@@ -58,7 +60,7 @@ export async function bulkTailor(
   application_ids: string[],
   master_resume_id: string,
   prompt_id = 'full',
-  rate_limit_seconds = 5.0
+  rate_limit_seconds = 10.0
 ): Promise<PipelineTask> {
   const res = await apiPost('/pipeline/bulk-tailor', {
     application_ids,

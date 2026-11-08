@@ -30,23 +30,35 @@ from apscheduler.triggers.cron import CronTrigger
 from firecrawl import FirecrawlApp
 
 from config import settings
-from contacts import find_linkedin_contacts
 from dedup import init_db, is_new_or_changed, is_url_seen, record_job
 from filter import passes_filters
+from job_meta import coerce_lookback, format_lookback, job_cap_for, page_cap_for, within_lookback
 from models import Job
-from output import post_to_resume_matcher, save_batch
+from output import persist_job, reset_batch, save_batch
 from sources import jobright, wellfound, yc_jobs
+
+# Line-buffer logs so the tracker UI sees progress before the process exits.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
-_firecrawl = FirecrawlApp(api_key=settings.firecrawl_api_key)
+_firecrawl = FirecrawlApp(
+    api_key=settings.firecrawl_api_key or "local",
+    api_url=settings.firecrawl_api_url,
+)
 _db: sqlite3.Connection | None = None
 _SOURCE_FILTER: str = "all"  # set by --source arg
+_LOOKBACK_MINUTES: int = 60
 
 
 def get_db() -> sqlite3.Connection:
@@ -93,18 +105,25 @@ def _collect_from_source(
     Phase 1: scan listing page → get brief items (title, company, url)
     Phase 2: scrape full details only for URLs we haven't seen before
     """
+    collected_new = 0
+    job_cap = job_cap_for(_LOOKBACK_MINUTES)
+    page_cap = page_cap_for(_LOOKBACK_MINUTES)
     for base_idx, base_url in enumerate(source.SEARCH_URLS):
+        if collected_new >= job_cap:
+            break
         if base_idx > 0:
             time.sleep(settings.request_delay_seconds)  # rate limit between listing scans
 
-        for page in range(1, settings.max_listing_pages + 1):
+        for page in range(1, page_cap + 1):
+            if collected_new >= job_cap:
+                break
             if page > 1:
                 time.sleep(settings.request_delay_seconds)
 
             url = source.paged_url(base_url, page)
             logger.info(f"  [{source_name}] scanning page {page}: {url.split('?')[0]}…")
 
-            # ── Phase 1: cheap listing scan ────────────────────────────────
+            # ── Phase 1: listing scan via scrape+links (no LLM) ─────────────
             listings = source.scan_listings(_firecrawl, url)
             if not listings:
                 logger.info(f"  [{source_name}] no listings returned, stopping pagination")
@@ -112,11 +131,24 @@ def _collect_from_source(
 
             new_urls: list[str] = []
             consecutive_known = 0
+            consecutive_old = 0
+            remaining = job_cap - collected_new
 
             for item in listings:
                 item_url = item.get("url", "")
                 if not item_url:
                     continue
+                posted_at = item.get("posted_at") or None
+                if posted_at and not within_lookback(posted_at, _LOOKBACK_MINUTES):
+                    consecutive_old += 1
+                    if consecutive_old >= settings.early_stop_threshold:
+                        logger.info(
+                            f"  [{source_name}] early stop: listings older than "
+                            f"{format_lookback(_LOOKBACK_MINUTES)}"
+                        )
+                        break
+                    continue
+                consecutive_old = 0
                 if is_url_seen(conn, item_url):
                     consecutive_known += 1
                     if consecutive_known >= settings.early_stop_threshold:
@@ -128,22 +160,26 @@ def _collect_from_source(
                 else:
                     consecutive_known = 0
                     new_urls.append(item_url)
+                    if len(new_urls) >= remaining:
+                        break
 
             logger.info(
-                f"  [{source_name}] page {page}: {len(new_urls)} new URLs, "
-                f"{len(listings) - len(new_urls)} already known"
+                f"  [{source_name}] page {page}: {len(new_urls)} new URLs in last "
+                f"{format_lookback(_LOOKBACK_MINUTES)}, "
+                f"{len(listings) - len(new_urls)} skipped (seen or older)"
             )
 
-            # ── Phase 2: full scrape — new URLs only ───────────────────────
+            # ── Phase 2: structured extract — new URLs only ─────────────────
             for i, job_url in enumerate(new_urls):
                 if i > 0:
-                    # Respect Firecrawl rate limits. Free tier ≈ 3 req/min.
-                    # Paid plan users can lower request_delay_seconds in .env.
                     time.sleep(settings.request_delay_seconds)
 
                 job = _scrape_with_retry(source, job_url)
                 if job:
+                    before = len(new_jobs)
                     _process_job(conn, job, new_jobs)
+                    if len(new_jobs) > before:
+                        collected_new += 1
 
             # Stop pagination if this entire page was mostly known jobs
             known_on_page = len(listings) - len(new_urls)
@@ -154,28 +190,37 @@ def _collect_from_source(
 def _process_job(conn: sqlite3.Connection, job: Job, new_jobs: list[Job]) -> None:
     is_new, changed = is_new_or_changed(conn, job)
 
+    if not within_lookback(job.posting_date, _LOOKBACK_MINUTES):
+        logger.info(
+            f"  SKIP {job.title} @ {job.company}: posted {job.posting_date} "
+            f"outside last {format_lookback(_LOOKBACK_MINUTES)}"
+        )
+        return
+
     passes, reason = passes_filters(job)
     if not passes:
         logger.debug(f"  SKIP {job.title} @ {job.company}: {reason}")
         record_job(conn, job)
         return
 
-    # Optional: find public LinkedIn contacts (degrades gracefully if unavailable)
-    try:
-        job.linkedin_contacts = find_linkedin_contacts(job.company, max_results=3)
-    except Exception:
-        pass
+    if not is_new and not changed:
+        record_job(conn, job)
+        return
 
     now = datetime.now(timezone.utc).isoformat()
     job.first_seen_at = now if is_new else job.first_seen_at
     job.last_seen_at = now
 
-    record_job(conn, job)
-    new_jobs.append(job)
+    posted = persist_job(job)
+    # Only mark seen after a successful post so a killed run can retry.
+    if posted:
+        record_job(conn, job)
+        new_jobs.append(job)
 
     flag = "NEW" if is_new else "UPDATED"
     logger.info(
         f"  [{flag}] [{job.source}] {job.title} @ {job.company} | "
+        f"{job.seniority or 'Mid'} | posted {job.posting_date or 'unknown'} | "
         f"{job.salary_text or 'salary unknown'} | {job.sponsorship_status.value}"
     )
 
@@ -188,45 +233,62 @@ def run_collection() -> None:
     start = datetime.now(timezone.utc)
     logger.info(f"=== Collection run starting {start.strftime('%Y-%m-%d %H:%M UTC')} ===")
 
+    reset_batch(lookback_minutes=_LOOKBACK_MINUTES)
+    logger.info(
+        "Lookback %s — cap %d jobs/source",
+        format_lookback(_LOOKBACK_MINUTES),
+        job_cap_for(_LOOKBACK_MINUTES),
+    )
     conn = get_db()
     new_jobs: list[Job] = []
 
-    # Initialize Jobright auth once per run (reuses saved session, re-logins if expired)
-    jobright_ready = jobright.init_auth(_firecrawl)
-
-    all_sources = [
-        (wellfound, "Wellfound"),
-        (yc_jobs,   "YC Jobs"),
-    ]
-    if jobright_ready:
-        all_sources.append((jobright, "Jobright"))
-
-    # Filter by --source flag if provided
-    if _SOURCE_FILTER != "all":
-        sources = [(m, n) for m, n in all_sources if n.lower().replace(" ", "") == _SOURCE_FILTER.lower()]
-        if not sources:
-            logger.warning(f"Unknown source filter '{_SOURCE_FILTER}', running all")
-            sources = all_sources
-    else:
-        sources = all_sources
-
-    for source_module, source_name in sources:
-        logger.info(f"--- {source_name} ---")
-        try:
-            _collect_from_source(source_module, source_name, conn, new_jobs)
-        except Exception as e:
-            logger.error(f"{source_name} crashed: {e}", exc_info=True)
-
-    elapsed = (datetime.now(timezone.utc) - start).total_seconds()
-
-    if new_jobs:
-        out_file = save_batch(new_jobs)
-        post_to_resume_matcher(new_jobs)
-        logger.info(
-            f"=== Done in {elapsed:.0f}s — {len(new_jobs)} new jobs → {out_file.name} ==="
+    # Search sources only: Jobright first, then Wellfound, then YC.
+    # Greenhouse is the ATS we apply through — never a listing source.
+    if _SOURCE_FILTER == "greenhouse":
+        logger.warning(
+            "Greenhouse is not a scrape source (it is the apply ATS). "
+            "Use jobright, wellfound, ycjobs, or all."
         )
-    else:
-        logger.info(f"=== Done in {elapsed:.0f}s — no new jobs this cycle ===")
+        return
+
+    jobright_ready = False
+    if _SOURCE_FILTER in ("all", "jobright"):
+        jobright_ready = jobright.init_auth(_firecrawl)
+        if not jobright_ready:
+            logger.warning(
+                "Jobright browser failed to start — Chrome/Edge must be installed. "
+                "Continuing with other sources if this is an All run."
+            )
+
+    sources: list[tuple[types.ModuleType, str]] = []
+    if _SOURCE_FILTER in ("all", "jobright") and jobright_ready:
+        sources.append((jobright, "Jobright"))
+    if _SOURCE_FILTER in ("all", "wellfound"):
+        sources.append((wellfound, "Wellfound"))
+    if _SOURCE_FILTER in ("all", "ycjobs"):
+        sources.append((yc_jobs, "YC Jobs"))
+    if _SOURCE_FILTER not in ("all", "jobright", "wellfound", "ycjobs"):
+        logger.warning(f"Unknown source filter '{_SOURCE_FILTER}', skipping")
+
+    try:
+        for source_module, source_name in sources:
+            logger.info(f"--- {source_name} ---")
+            try:
+                _collect_from_source(source_module, source_name, conn, new_jobs)
+            except Exception as e:
+                logger.error(f"{source_name} crashed: {e}", exc_info=True)
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+
+        if new_jobs:
+            out_file = save_batch(new_jobs)
+            logger.info(
+                f"=== Done in {elapsed:.0f}s — {len(new_jobs)} new jobs → {out_file.name} ==="
+            )
+        else:
+            logger.info(f"=== Done in {elapsed:.0f}s — no new jobs this cycle ===")
+    finally:
+        jobright.close_session()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,13 +296,23 @@ def run_collection() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global _SOURCE_FILTER, _LOOKBACK_MINUTES
     if "--once" in sys.argv:
         # Optional: --source jobright|wellfound|yc (defaults to all)
         source_filter = next(
             (sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == "--source" and i + 1 < len(sys.argv)),
             "all",
         )
+        lookback_raw = next(
+            (
+                sys.argv[i + 1]
+                for i, a in enumerate(sys.argv)
+                if a == "--lookback-minutes" and i + 1 < len(sys.argv)
+            ),
+            "60",
+        )
         _SOURCE_FILTER = source_filter
+        _LOOKBACK_MINUTES = coerce_lookback(lookback_raw)
         run_collection()
         return
 

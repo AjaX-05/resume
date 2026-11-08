@@ -15,7 +15,7 @@ export const TAILOR_PAGE_LIMITS: readonly TailorPageLimit[] = [1, 2, 3, null];
 export const TAILOR_BULLET_CAPS: readonly TailorBulletCap[] = [3, 5, null];
 
 export const DEFAULT_TAILOR_LENGTH: TailorLengthSettings = {
-  maxPages: 2,
+  maxPages: 3,
   maxBulletsPerEntry: null,
 };
 

@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APPLICATION_STATUS_ORDER, type ApplicationStatus } from '@/lib/api/tracker';
 import {
+  BOARD_COLUMN_ORDER,
+  isLastVisibleColumn,
   isLastVisibleStatus,
+  readHiddenColumns,
   readHiddenStatuses,
+  toggleHiddenColumn,
   toggleHiddenStatus,
   TRACKER_HIDDEN_STATUSES_KEY,
+  writeHiddenColumns,
   writeHiddenStatuses,
+  type BoardColumnId,
 } from '@/lib/utils/tracker-column-visibility';
 
 const ALL_BUT_SAVED = APPLICATION_STATUS_ORDER.filter((status) => status !== 'saved');
@@ -52,8 +58,8 @@ describe('tracker column visibility storage', () => {
   it('writes statuses in the canonical order', () => {
     writeHiddenStatuses(new Set<ApplicationStatus>(['rejected', 'saved']));
     expect(JSON.parse(localStorage.getItem(TRACKER_HIDDEN_STATUSES_KEY) ?? '[]')).toEqual([
-      APPLICATION_STATUS_ORDER[0],
-      APPLICATION_STATUS_ORDER[APPLICATION_STATUS_ORDER.length - 1],
+      ...BOARD_COLUMN_ORDER.filter((id) => id.startsWith('saved:')),
+      'rejected',
     ]);
   });
 
@@ -127,5 +133,36 @@ describe('toggleHiddenStatus', () => {
     const hidden = new Set<ApplicationStatus>(['interview']);
     toggleHiddenStatus(hidden, 'applied');
     expect(Array.from(hidden)).toEqual(['interview']);
+  });
+});
+
+describe('JD seniority column visibility', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('expands a legacy hidden "saved" into every JD lane', () => {
+    localStorage.setItem(TRACKER_HIDDEN_STATUSES_KEY, JSON.stringify(['saved', 'interview']));
+    const hidden = readHiddenColumns();
+    expect(hidden.has('saved:Entry')).toBe(true);
+    expect(hidden.has('saved:Architect')).toBe(true);
+    expect(hidden.has('interview')).toBe(true);
+    expect(hidden.has('applied')).toBe(false);
+  });
+
+  it('hides one JD lane independently', () => {
+    const next = toggleHiddenColumn(new Set<BoardColumnId>(), 'saved:Senior');
+    expect(Array.from(next)).toEqual(['saved:Senior']);
+    writeHiddenColumns(next);
+    expect(JSON.parse(localStorage.getItem(TRACKER_HIDDEN_STATUSES_KEY) ?? '[]')).toEqual([
+      'saved:Senior',
+    ]);
+  });
+
+  it('refuses to hide the last visible JD lane', () => {
+    const hidden = new Set<BoardColumnId>(BOARD_COLUMN_ORDER.filter((id) => id !== 'saved:Mid'));
+    const next = toggleHiddenColumn(hidden, 'saved:Mid');
+    expect(next).toBe(hidden);
+    expect(isLastVisibleColumn(hidden, 'saved:Mid')).toBe(true);
   });
 });

@@ -7,6 +7,7 @@ data/*.migrated
 data/database.json*
 # Uploaded resume files: personal data, like everything else in data/.
 data/uploads/
+data/browser_sessions/
 !data/.gitkeep
 
 # Config file with API keys - NEVER COMMIT

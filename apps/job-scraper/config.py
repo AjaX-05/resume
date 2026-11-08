@@ -8,7 +8,8 @@ BASE_DIR = Path(__file__).parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", extra="ignore")
 
-    firecrawl_api_key: str
+    firecrawl_api_key: str = "local"
+    firecrawl_api_url: str = "http://127.0.0.1:3002"
 
     # Jobright — Playwright auto-login (preferred, needs a non-locked-down machine)
     jobright_email: str = ""
@@ -32,15 +33,38 @@ class Settings(BaseSettings):
 
     min_base_salary: int = 140_000
 
+    # Not used for scraping. Greenhouse is the apply ATS for postings found
+    # on Jobright / Wellfound / YC. Kept so tests and older configs still load.
+    greenhouse_companies: list[str] = [
+        "anthropic",
+        "openai",
+        "databricks",
+        "stripe",
+        "airbnb",
+        "discord",
+        "reddit",
+        "figma",
+        "cloudflare",
+        "notion",
+        "andurilindustries",
+        "anysphere",
+        "huggingface",
+        "scaleai",
+        "togetherai",
+    ]
+
     # Per run: how many listing pages to check per search URL (page 1 = newest)
     max_listing_pages: int = 2
+
+    # Cap LLM-backed full-job extracts per source so a first run cannot stall for hours
+    max_new_jobs_per_source: int = 20
 
     # Stop paginating when this many consecutive already-seen listings are found
     early_stop_threshold: int = 5
 
-    # Seconds to wait between Phase 2 (full job scrape) calls to stay under Firecrawl rate limits.
-    # Free tier ≈ 3 req/min → use 22s.  Paid Standard plan → use 5s.
-    request_delay_seconds: int = 22
+    # Seconds to wait between Phase 2 (full job scrape) calls.
+    # Local Firecrawl does not need the hosted 22s gap; keep a small pause.
+    request_delay_seconds: int = 3
 
 
 settings = Settings()

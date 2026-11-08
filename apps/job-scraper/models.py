@@ -35,6 +35,7 @@ class Job:
     sponsorship_evidence: str = ""
 
     posting_date: Optional[str] = None
+    seniority: str = ""
     req_id: Optional[str] = None
     linkedin_contacts: list[str] = field(default_factory=list)
 

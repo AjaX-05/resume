@@ -8,40 +8,32 @@ Filters:
   - AI/ML/Data/Software roles
 """
 import logging
+import re
 import sys
 from pathlib import Path
 
 from firecrawl import FirecrawlApp
-from firecrawl.v2.types import ScrapeOptions
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from extract import ExtractedJob, ListingPageResult, to_job
+from extract import ExtractedJob, to_job
+from firecrawl_io import extract_job_json, scrape_listing_urls
 from models import Job
 
 logger = logging.getLogger(__name__)
 
-# Wellfound uses role slugs + remote + optional salary filter
-# All sorted by recently_added (newest first)
 SEARCH_URLS = [
-    # Core ML/AI roles
     "https://wellfound.com/jobs?role=machine-learning-engineer&remote=true&locationSlug=United-States",
     "https://wellfound.com/jobs?role=applied-ai-scientist&remote=true&locationSlug=United-States",
     "https://wellfound.com/jobs?role=data-scientist&remote=true&locationSlug=United-States",
     "https://wellfound.com/jobs?role=data-engineer&remote=true&locationSlug=United-States",
-    # Software Engineering roles
     "https://wellfound.com/jobs?role=software-engineer&remote=true&locationSlug=United-States",
     "https://wellfound.com/jobs?role=backend-engineer&remote=true&locationSlug=United-States",
     "https://wellfound.com/jobs?role=full-stack-engineer&remote=true&locationSlug=United-States",
-    # Architecture / Leadership
     "https://wellfound.com/jobs?role=solutions-architect&remote=true&locationSlug=United-States",
 ]
 
-_LISTING_PROMPT = (
-    "Extract all job listings visible on this Wellfound job search page. "
-    "For each listing return: the exact full job URL, job title, company name, "
-    "salary range if shown, and location. Include every visible listing."
-)
+JOB_URL_RE = re.compile(r"https://(?:www\.)?wellfound\.com/jobs/\d+[a-z0-9-]*", re.I)
 
 _JOB_PROMPT = (
     "Extract the complete job posting: title, company, full description text, "
@@ -50,41 +42,23 @@ _JOB_PROMPT = (
     "sponsorship or work authorization, the direct apply URL, and posting date."
 )
 
-_OPTS = ScrapeOptions(skip_tls_verification=True, wait_for=2500)
-
 
 def paged_url(base: str, page: int) -> str:
     return base if page == 1 else f"{base}&page={page}"
 
 
 def scan_listings(app: FirecrawlApp, url: str) -> list[dict]:
-    """Phase 1: cheap listing scan."""
-    try:
-        result = app.extract(
-            [url],
-            prompt=_LISTING_PROMPT,
-            schema=ListingPageResult.model_json_schema(),
-            scrape_options=_OPTS,
-        )
-        return (result.data or {}).get("jobs", []) if result.data else []
-    except Exception as e:
-        logger.warning(f"Wellfound listing scan failed [{url.split('?')[0]}]: {e}")
-        return []
+    """Phase 1: scrape listing page links — no LLM."""
+    return scrape_listing_urls(app, url, JOB_URL_RE)
 
 
 def scrape_job(app: FirecrawlApp, url: str) -> Job | None:
-    """Phase 2: full scrape for a single new job URL."""
+    """Phase 2: structured JSON extract of a single job posting."""
+    data = extract_job_json(app, url, _JOB_PROMPT, ExtractedJob.model_json_schema())
+    if not data or not data.get("title"):
+        return None
     try:
-        result = app.extract(
-            [url],
-            prompt=_JOB_PROMPT,
-            schema=ExtractedJob.model_json_schema(),
-            scrape_options=_OPTS,
-        )
-        data = result.data
-        if not data or not data.get("title"):
-            return None
         return to_job(ExtractedJob(**data), source="wellfound", source_url=url)
     except Exception as e:
-        logger.warning(f"Wellfound job scrape failed [{url}]: {e}")
+        logger.warning(f"Wellfound job parse failed [{url}]: {e}")
         return None

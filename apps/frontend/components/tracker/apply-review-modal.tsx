@@ -41,6 +41,8 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmitted: () => void;
+  /** When false, poll an already-started session (bulk auto-apply) instead of POSTing /applier/start. */
+  startOnOpen?: boolean;
 }
 
 export function ApplyReviewModal({
@@ -49,6 +51,7 @@ export function ApplyReviewModal({
   open,
   onOpenChange,
   onSubmitted,
+  startOnOpen = true,
 }: Props) {
   const [session, setSession] = useState<ApplySession | null>(null);
   const [screenshotB64, setScreenshotB64] = useState<string | null>(null);
@@ -100,18 +103,28 @@ export function ApplyReviewModal({
     [screenshotB64, fetchScreenshot, stopPoll, onSubmitted]
   );
 
-  // Start apply when modal opens
+  // Start apply when modal opens (single-card flow). Bulk auto-apply already
+  // started the Playwright session — just poll it.
   useEffect(() => {
-    if (!open || !applicationId || !resumeId || startedRef.current) return;
+    if (!open || !applicationId || startedRef.current) return;
+    if (startOnOpen && !resumeId) return;
     startedRef.current = true;
     setLoading(true);
     setError(null);
     setScreenshotB64(null);
     setSession(null);
 
-    startApply(applicationId, resumeId)
+    const begin = startOnOpen
+      ? startApply(applicationId, resumeId as string)
+      : getApplyStatus(applicationId).then((s) => {
+          if (!s) throw new Error('Apply session not found');
+          return s;
+        });
+
+    begin
       .then((s) => {
         setSession(s);
+        if (s.has_screenshot) void fetchScreenshot(applicationId);
         pollRef.current = setInterval(() => pollStatus(applicationId), POLL_MS);
       })
       .catch((e: unknown) => {
@@ -119,9 +132,12 @@ export function ApplyReviewModal({
       })
       .finally(() => setLoading(false));
 
-    return stopPoll;
+    return () => {
+      stopPoll();
+      startedRef.current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, applicationId, resumeId]);
+  }, [open, applicationId, resumeId, startOnOpen]);
 
   // Reset when modal closes
   const handleOpenChange = (v: boolean) => {

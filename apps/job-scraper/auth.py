@@ -4,6 +4,7 @@ from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
 
+from browser import launch_chromium
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,11 +50,7 @@ def _parse_cookie_string(raw: str) -> dict[str, str]:
 def _playwright_login(auth_file: Path) -> dict[str, str]:
     logger.info("Opening browser to log into Jobright.ai (Playwright)...")
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            slow_mo=300,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        browser = launch_chromium(p, headless=False, slow_mo=300)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

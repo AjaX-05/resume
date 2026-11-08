@@ -20,6 +20,7 @@ import { Alert } from '@/components/ui/alert';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { useTranslations } from '@/lib/i18n';
 import { formatDate } from '@/lib/format-date';
+import { formatPostedAgo, parseScrapeMeta } from '@/lib/scrape-meta';
 import { getApplicationDetail, updateApplication, type ApplicationDetail } from '@/lib/api/tracker';
 
 interface CardDetailModalProps {
@@ -100,15 +101,10 @@ export function CardDetailModal({
     const m = notes.match(/^Apply:\s*(https?:\/\/\S+)/im);
     return m ? m[1] : '';
   })();
-  const isSupportedApplyUrl =
+  const isSupportedApplyUrl = Boolean(
     applyUrl &&
-    (applyUrl.includes('greenhouse.io') ||
-      applyUrl.includes('lever.co') ||
-      applyUrl.includes('ashbyhq.com') ||
-      applyUrl.includes('jobs.smartrecruiters') ||
-      applyUrl.includes('careers.') ||
-      applyUrl.includes('jobs.') ||
-      applyUrl.includes('icims.com'));
+      !/workday|icims\.com|jobvite|linkedin\.com|indeed\.com/i.test(applyUrl)
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -126,7 +122,7 @@ export function CardDetailModal({
             </div>
           ) : detail ? (
             <div className="space-y-4">
-              <div className="flex items-center gap-3 font-mono text-xs uppercase text-ink-soft">
+              <div className="flex flex-wrap items-center gap-3 font-mono text-xs uppercase text-ink-soft">
                 <StatusIndicator tone="neutral">
                   {t(`tracker.columns.${detail.status}`)}
                 </StatusIndicator>
@@ -135,6 +131,21 @@ export function CardDetailModal({
                     {formatDate(detail.applied_at, locale, { month: 'short', year: 'numeric' })}
                   </span>
                 )}
+                {(() => {
+                  const meta = parseScrapeMeta(detail.notes);
+                  return (
+                    <>
+                      {meta.seniority && (
+                        <span className="border border-ink px-1 font-bold text-ink">
+                          {meta.seniority}
+                        </span>
+                      )}
+                      <span className="tabular-nums" title={meta.postedAt || undefined}>
+                        {formatPostedAgo(meta.postedAt, meta.postedLabel)}
+                      </span>
+                    </>
+                  );
+                })()}
               </div>
 
               <div className="space-y-1">

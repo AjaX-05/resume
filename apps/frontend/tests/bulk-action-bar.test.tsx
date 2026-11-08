@@ -25,6 +25,25 @@ describe('BulkActionBar', () => {
     expect(onMove).toHaveBeenCalledWith('interview');
   });
 
+  it('queues bulk tailor one at a time and blocks a second click while running', () => {
+    const onBulkTailor = vi.fn();
+    render(
+      <BulkActionBar
+        selectedCount={10}
+        tailorableCount={10}
+        onMove={vi.fn()}
+        onDelete={vi.fn()}
+        onClear={vi.fn()}
+        onBulkTailor={onBulkTailor}
+        batchRunning
+      />
+    );
+    const tailor = screen.getByRole('button', { name: /queue running/i });
+    expect(tailor).toBeDisabled();
+    fireEvent.click(tailor);
+    expect(onBulkTailor).not.toHaveBeenCalled();
+  });
+
   it('confirms the delete with the danger button', () => {
     const { onDelete } = renderBar();
 

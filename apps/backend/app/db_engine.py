@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.schema import CreateColumn
 
-from app.models import Base, Improvement, Resume
+from app.models import Base, Improvement, QueueItem, Resume
 
 __all__ = [
     "Base",
@@ -123,6 +123,7 @@ def _init_postgres(engine: Engine, schema: str | None) -> None:
         _add_missing_column(conn, Improvement.__table__.c.ats_score, schema)
         _add_missing_column(conn, Improvement.__table__.c.forced_keywords, schema)
         _add_missing_column(conn, Resume.__table__.c.template_settings, schema)
+        _add_missing_column(conn, QueueItem.__table__.c.application_id, schema)
 
 
 def init_models_sync(engine: Engine, schema: str | None = None) -> None:
@@ -165,6 +166,7 @@ def init_models_sync(engine: Engine, schema: str | None = None) -> None:
         _add_missing_column(conn, Improvement.__table__.c.ats_score)
         _add_missing_column(conn, Improvement.__table__.c.forced_keywords)
         _add_missing_column(conn, Resume.__table__.c.template_settings)
+        _add_missing_column(conn, QueueItem.__table__.c.application_id)
 
         preview_columns = (
             conn.exec_driver_sql("PRAGMA table_info(tailoring_previews)")

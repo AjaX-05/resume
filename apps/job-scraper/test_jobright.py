@@ -33,14 +33,23 @@ def main() -> None:
     tmp_db = Path(tempfile.mktemp(suffix=".db"))
     conn = init_db(tmp_db)
 
-    # Step 1: Jobright auth (browser opens, auto-fills, closes)
-    print("\n=== Step 1: Jobright Login ===")
+    # Step 1: start Chrome. Login is optional — public listings already work.
+    print("\n=== Step 1: Jobright browser ===")
     ok = jobright.init_auth(app)
     if not ok:
-        print("Auth failed — check JOBRIGHT_EMAIL/PASSWORD in .env")
+        print("Chrome/Edge failed to start.")
         return
-    print("Login successful.")
+    print("Browser ready (login is optional).")
 
+    try:
+        _run_scan(app, conn)
+    finally:
+        jobright.close_session()
+        conn.close()
+        tmp_db.unlink(missing_ok=True)
+
+
+def _run_scan(app, conn) -> None:
     # Step 2: Scan listing pages (Phase 1) — ML and AI categories only for this test
     test_urls = [
         "https://jobright.ai/jobs/Machine-Learning?locationName=United+States&isRemote=true&sortBy=date",
@@ -106,9 +115,6 @@ def main() -> None:
         print("\nPassing job titles:")
         for j in passed:
             print(f"  • {j.title} @ {j.company} | {j.salary_text or 'salary unknown'} | {j.sponsorship_status.value}")
-
-    conn.close()
-    tmp_db.unlink()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   DndContext,
@@ -36,12 +36,23 @@ import { PipelineProgressModal } from './pipeline-progress-modal';
 import { planMove } from './reorder';
 import { ManageColumnsDialog } from './manage-columns-dialog';
 import {
-  readHiddenStatuses,
-  toggleHiddenStatus,
-  writeHiddenStatuses,
+  readHiddenColumns,
+  toggleHiddenColumn,
+  writeHiddenColumns,
+  type BoardColumnId,
 } from '@/lib/utils/tracker-column-visibility';
 import { useAtsMap } from '@/hooks/use-ats-map';
-import { bulkTailor, bulkApply, getPipelineConfig } from '@/lib/api/pipeline';
+import { bulkTailor, bulkApply, getPipelineConfig, type PipelineTask } from '@/lib/api/pipeline';
+import { fetchResumeList } from '@/lib/api/resume';
+import { cardFingerprint, pickUniqueTailorIds } from '@/lib/card-fingerprint';
+import {
+  cardSeniority,
+  latestScrapeBatch,
+  parseScrapeMeta,
+  postedWithinMinutes,
+  SENIORITY_ORDER,
+  type Seniority,
+} from '@/lib/scrape-meta';
 
 function emptyColumns(): ApplicationColumns {
   return APPLICATION_STATUS_ORDER.reduce((acc, status) => {
@@ -50,7 +61,27 @@ function emptyColumns(): ApplicationColumns {
   }, {} as ApplicationColumns);
 }
 
-export function KanbanBoard() {
+type BoardLane = {
+  key: string;
+  status: ApplicationStatus;
+  seniority?: Seniority;
+  title: string;
+  applications: Application[];
+  droppableId: string;
+};
+
+interface KanbanBoardProps {
+  reloadToken?: number;
+  postedFilterMinutes?: number | null;
+  /** When Auto-Apply is flipped ON, the scraper panel starts a batch and passes its task id. */
+  kickTaskId?: string | null;
+}
+
+export function KanbanBoard({
+  reloadToken = 0,
+  postedFilterMinutes = null,
+  kickTaskId = null,
+}: KanbanBoardProps) {
   const { t } = useTranslations();
   const reducedMotion = useReducedMotion();
   const sensors = useSensors(
@@ -65,22 +96,24 @@ export function KanbanBoard() {
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [manualAddOpen, setManualAddOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
-  const [hiddenStatuses, setHiddenStatuses] = useState<Set<ApplicationStatus>>(() =>
-    readHiddenStatuses()
+  const [hiddenColumns, setHiddenColumns] = useState<Set<BoardColumnId>>(() =>
+    readHiddenColumns()
   );
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [progressOpen, setProgressOpen] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [info, setInfo] = useState<string | null>(null);
   const [masterResumeId, setMasterResumeId] = useState<string | null>(null);
   const [tailorPromptId, setTailorPromptId] = useState<string>('full');
 
   // Persist on an actual change only — an effect keyed on the state would also
   // write the just-read value straight back on mount.
-  const handleToggleStatus = (status: ApplicationStatus) => {
-    const next = toggleHiddenStatus(hiddenStatuses, status);
+  const handleToggleColumn = (columnId: BoardColumnId) => {
+    const next = toggleHiddenColumn(hiddenColumns, columnId);
     // Refused (last visible stage): identical instance, nothing to store.
-    if (next === hiddenStatuses) return;
-    setHiddenStatuses(next);
-    writeHiddenStatuses(next);
+    if (next === hiddenColumns) return;
+    setHiddenColumns(next);
+    writeHiddenColumns(next);
   };
 
   // Horizontal-scroll affordance: the seven stages overflow the canvas, so we
@@ -90,7 +123,7 @@ export function KanbanBoard() {
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await listApplications();
       // Ensure all seven keys exist even if the server omits an empty one.
@@ -101,17 +134,76 @@ export function KanbanBoard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
+
+  const handleBatchProgress = useCallback(() => {
+    void load();
+  }, [load]);
+
+  const handleBatchComplete = useCallback(
+    (task?: PipelineTask | null) => {
+      if (task?.follow_up_task_id) {
+        setActiveTaskId(task.follow_up_task_id);
+        setProgressOpen(true);
+        setBatchRunning(true);
+        setInfo('Auto-applying tailored resumes one at a time.');
+        void load();
+        return;
+      }
+      setBatchRunning(false);
+      void load();
+    },
+    [load]
+  );
+
+  useEffect(() => {
+    if (!kickTaskId) return;
+    setActiveTaskId(kickTaskId);
+    setProgressOpen(true);
+    setBatchRunning(true);
+    setInfo('Auto-applying tailored resumes one at a time.');
+  }, [kickTaskId]);
 
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [reloadToken]);
 
   const allCards: Application[] = useMemo(
     () => APPLICATION_STATUS_ORDER.flatMap((status) => columns[status]),
     [columns]
   );
+
+  const latestBatch = useMemo(
+    () => latestScrapeBatch(allCards.map((card) => card.notes)),
+    [allCards]
+  );
+
+  const visibleColumns: ApplicationColumns = useMemo(() => {
+    const next = emptyColumns();
+    for (const status of APPLICATION_STATUS_ORDER) {
+      let cards = columns[status];
+      if (postedFilterMinutes != null) {
+        cards = cards.filter((card) =>
+          postedWithinMinutes(parseScrapeMeta(card.notes).postedAt, postedFilterMinutes)
+        );
+      }
+      if (status === 'saved') {
+        cards = [...cards].sort((a, b) => {
+          const aMeta = parseScrapeMeta(a.notes);
+          const bMeta = parseScrapeMeta(b.notes);
+          const aNew = latestBatch && aMeta.scrapeBatch === latestBatch ? 0 : 1;
+          const bNew = latestBatch && bMeta.scrapeBatch === latestBatch ? 0 : 1;
+          if (aNew !== bNew) return aNew - bNew;
+          const aPosted = aMeta.postedAt || a.created_at;
+          const bPosted = bMeta.postedAt || b.created_at;
+          return bPosted.localeCompare(aPosted);
+        });
+      }
+      next[status] = cards;
+    }
+    return next;
+  }, [columns, postedFilterMinutes, latestBatch]);
 
   const allIds = useMemo(() => allCards.map((c) => c.application_id), [allCards]);
   const { atsMap } = useAtsMap(allIds);
@@ -152,49 +244,163 @@ export function KanbanBoard() {
     return n;
   }, [columns.applied, selectedIds, atsMap]);
 
+  const duplicateIds = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const card of allCards) {
+      const fingerprint = cardFingerprint(card.company, card.role);
+      if (!fingerprint) continue;
+      const list = groups.get(fingerprint) ?? [];
+      list.push(card.application_id);
+      groups.set(fingerprint, list);
+    }
+    const ids = new Set<string>();
+    for (const list of groups.values()) {
+      if (list.length < 2) continue;
+      for (const id of list) ids.add(id);
+    }
+    return ids;
+  }, [allCards]);
+
   const collectEligible = (status: ApplicationStatus, needsResume: boolean): string[] => {
     const ids: string[] = [];
     for (const card of columns[status] ?? []) {
       if (!selectedIds.has(card.application_id)) continue;
       if (needsResume && !card.resume_id) continue;
-      const info = atsMap[card.application_id];
-      if (info?.supported) ids.push(card.application_id);
+      const cardAts = atsMap[card.application_id];
+      if (cardAts?.supported) ids.push(card.application_id);
     }
     return ids;
   };
 
+  const resolveMasterResumeId = async (): Promise<string | null> => {
+    if (masterResumeId) return masterResumeId;
+    try {
+      const list = await fetchResumeList(true);
+      const ready = list.filter((r) => r.is_master && r.processing_status === 'ready');
+      const master =
+        ready.find((r) => r.is_default_master) ?? ready[0];
+      if (master) {
+        setMasterResumeId(master.resume_id);
+        return master.resume_id;
+      }
+    } catch {
+      /* fall through */
+    }
+    return null;
+  };
+
   const handleBulkTailor = async () => {
-    const ids = collectEligible('saved', false);
-    if (ids.length === 0) return;
-    if (!masterResumeId) {
-      setError('No master resume configured. Set one in Pipeline settings.');
+    if (batchRunning) return;
+    const selected = (columns.saved ?? []).filter((card) =>
+      selectedIds.has(card.application_id)
+    );
+    const { ids, skippedDup } = pickUniqueTailorIds(
+      selected,
+      columns.applied ?? [],
+      atsMap
+    );
+    if (ids.length === 0) {
+      setError(
+        skippedDup
+          ? 'Those JDs already have a tailored twin. Delete the duplicate card or pick different jobs.'
+          : 'No supported JDs in the selection.'
+      );
+      return;
+    }
+    const master = await resolveMasterResumeId();
+    if (!master) {
+      setError('No master resume configured. Upload a master resume first.');
       return;
     }
     try {
-      const task = await bulkTailor(ids, masterResumeId, tailorPromptId);
+      setBatchRunning(true);
+      const task = await bulkTailor(ids, master, tailorPromptId, 10);
       setActiveTaskId(task.task_id);
       setProgressOpen(true);
+      setError(null);
+      setInfo(
+        skippedDup
+          ? `Queued ${ids.length} job${ids.length === 1 ? '' : 's'} one at a time. Skipped ${skippedDup} duplicate${skippedDup === 1 ? '' : 's'}.`
+          : `Queued ${ids.length} job${ids.length === 1 ? '' : 's'} one at a time. The local model will not run them in parallel.`
+      );
     } catch (e) {
+      setBatchRunning(false);
       setError(e instanceof Error ? e.message : 'Bulk tailor failed');
     }
   };
 
   const handleBulkApply = async () => {
+    if (batchRunning) return;
     const ids = collectEligible('applied', true);
     if (ids.length === 0) return;
     try {
+      setBatchRunning(true);
       const task = await bulkApply(ids);
       setActiveTaskId(task.task_id);
       setProgressOpen(true);
+      setInfo(`Applying ${ids.length} job${ids.length === 1 ? '' : 's'} one at a time.`);
     } catch (e) {
+      setBatchRunning(false);
       setError(e instanceof Error ? e.message : 'Bulk apply failed');
     }
   };
 
   const visibleStatuses = useMemo(
-    () => APPLICATION_STATUS_ORDER.filter((status) => !hiddenStatuses.has(status)),
-    [hiddenStatuses]
+    () =>
+      APPLICATION_STATUS_ORDER.filter((status) => {
+        if (status === 'saved') {
+          return SENIORITY_ORDER.some((level) => !hiddenColumns.has(`saved:${level}`));
+        }
+        return !hiddenColumns.has(status);
+      }),
+    [hiddenColumns]
   );
+
+  const toggleSelectColumn = (ids: string[]) => {
+    if (ids.length === 0) return;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allOn = ids.every((id) => next.has(id));
+      if (allOn) {
+        for (const id of ids) next.delete(id);
+      } else {
+        for (const id of ids) next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const boardLanes: BoardLane[] = useMemo(() => {
+    const lanes: BoardLane[] = [];
+    for (const status of visibleStatuses) {
+      if (status === 'saved') {
+        for (const level of SENIORITY_ORDER) {
+          const key = `saved:${level}` as const;
+          if (hiddenColumns.has(key)) continue;
+          const applications = visibleColumns.saved.filter(
+            (card) => cardSeniority(card.role, card.notes) === level
+          );
+          lanes.push({
+            key,
+            status,
+            seniority: level,
+            title: `${t('tracker.columns.saved')}-${level}`,
+            applications,
+            droppableId: `column:saved:${level}`,
+          });
+        }
+      } else {
+        lanes.push({
+          key: status,
+          status,
+          title: t(`tracker.columns.${status}`),
+          applications: visibleColumns[status],
+          droppableId: `column:${status}`,
+        });
+      }
+    }
+    return lanes;
+  }, [visibleStatuses, visibleColumns, hiddenColumns, t]);
 
   // Master resume ids that back more than one card → "shared resume" badge.
   const sharedResumeIds = useMemo(() => {
@@ -225,7 +431,7 @@ export function KanbanBoard() {
       el.removeEventListener('scroll', sync);
       window.removeEventListener('resize', sync);
     };
-  }, [loading, isEmpty]);
+  }, [loading, isEmpty, boardLanes.length]);
 
   const scrollByColumn = (direction: 1 | -1) => {
     scrollRef.current?.scrollBy({
@@ -234,8 +440,8 @@ export function KanbanBoard() {
     });
   };
 
-  const scrollToColumn = (status: ApplicationStatus) => {
-    scrollRef.current?.querySelector<HTMLElement>(`[data-column="${status}"]`)?.scrollIntoView({
+  const scrollToColumn = (laneKey: string) => {
+    scrollRef.current?.querySelector<HTMLElement>(`[data-column="${laneKey}"]`)?.scrollIntoView({
       behavior: reducedMotion ? 'auto' : 'smooth',
       inline: 'center',
       block: 'nearest',
@@ -363,6 +569,12 @@ export function KanbanBoard() {
         </div>
       )}
 
+      {info && !error && (
+        <div className="shrink-0 border-b border-ink px-6 py-3 md:px-8">
+          <Alert tone="info">{info}</Alert>
+        </div>
+      )}
+
       {selectedIds.size > 0 && (
         <div className="shrink-0 border-b border-ink px-6 py-3 md:px-8">
           <BulkActionBar
@@ -374,6 +586,7 @@ export function KanbanBoard() {
             onClear={clearSelection}
             onBulkTailor={handleBulkTailor}
             onBulkApply={handleBulkApply}
+            batchRunning={batchRunning}
           />
         </div>
       )}
@@ -399,21 +612,28 @@ export function KanbanBoard() {
             onDragEnd={handleDragEnd}
           >
             <div ref={scrollRef} className="flex min-h-0 flex-1 overflow-x-auto">
-              {visibleStatuses.map((status, index) => (
+              {boardLanes.map((lane, index) => (
                 <div
-                  key={status}
-                  data-column={status}
-                  className={`flex ${
-                    index < visibleStatuses.length - 1 ? 'border-r border-ink' : ''
-                  }`}
+                  key={lane.key}
+                  data-column={lane.key}
+                  className={`flex ${index < boardLanes.length - 1 ? 'border-r border-ink' : ''}`}
                 >
                   <KanbanColumn
-                    status={status}
-                    applications={columns[status]}
+                    status={lane.status}
+                    title={lane.title}
+                    droppableId={lane.droppableId}
+                    applications={lane.applications}
                     selectedIds={selectedIds}
                     sharedResumeIds={sharedResumeIds}
+                    latestBatch={latestBatch}
+                    duplicateIds={duplicateIds}
                     atsMap={atsMap}
                     onToggleSelect={toggleSelect}
+                    onToggleSelectAll={
+                      lane.status === 'saved'
+                        ? () => toggleSelectColumn(lane.applications.map((a) => a.application_id))
+                        : undefined
+                    }
                     onOpen={setOpenCardId}
                   />
                 </div>
@@ -434,15 +654,15 @@ export function KanbanBoard() {
             </span>
           )}
           <div className="flex items-center gap-2">
-            {visibleStatuses.map((status) => (
+            {boardLanes.map((lane) => (
               <button
-                key={status}
+                key={lane.key}
                 type="button"
-                onClick={() => scrollToColumn(status)}
+                onClick={() => scrollToColumn(lane.key)}
                 className={buttonClass({ variant: 'outline', size: 'sm', className: 'shrink-0' })}
               >
-                {t(`tracker.columns.${status}`)}
-                <span className="text-ink-soft tabular-nums">{columns[status].length}</span>
+                {lane.title}
+                <span className="text-ink-soft tabular-nums">{lane.applications.length}</span>
               </button>
             ))}
           </div>
@@ -467,15 +687,16 @@ export function KanbanBoard() {
       <ManageColumnsDialog
         open={manageOpen}
         onOpenChange={setManageOpen}
-        hiddenStatuses={hiddenStatuses}
-        onToggle={handleToggleStatus}
+        hiddenColumns={hiddenColumns}
+        onToggle={handleToggleColumn}
       />
 
       <PipelineProgressModal
         taskId={activeTaskId}
         open={progressOpen}
         onOpenChange={setProgressOpen}
-        onComplete={() => void load()}
+        onComplete={handleBatchComplete}
+        onProgress={handleBatchProgress}
       />
     </div>
   );
