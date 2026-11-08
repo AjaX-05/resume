@@ -6,24 +6,22 @@ the production tailor flow will exhibit the regression. Run with:
     cd apps/backend && uv run pytest tests/unit/test_prompt_improvements.py -v
 """
 
+from app.prompts.refinement import AI_PHRASE_BLACKLIST, AI_PHRASE_REPLACEMENTS
+from app.prompts.templates import (
+    _RULE_PROTECTED_FIELDS,
+    _RULE_SUMMARY_MIRROR,
+    _RULE_TECH_VOCAB_DISTRIBUTION,
+    IMPROVE_RESUME_PROMPTS,
+    IMPROVE_SCHEMA_EXAMPLE,
+)
+from app.routers.resumes import _title_blend_is_safe
+from app.services.refiner import _force_jd_skills_into_array, _scrub_employer_leakage
 from app.services.writing_quality import (
-    _LINE_WIDTH_CHARS,
     _MIN_LAST_LINE_FILL_PCT,
     _last_line_fill_pct,
     _line_fill_advice,
     check_writing,
 )
-from app.services.refiner import _force_jd_skills_into_array, _scrub_employer_leakage
-from app.prompts.refinement import AI_PHRASE_BLACKLIST, AI_PHRASE_REPLACEMENTS
-from app.prompts.templates import (
-    IMPROVE_RESUME_PROMPTS,
-    IMPROVE_SCHEMA_EXAMPLE,
-    _RULE_PROTECTED_FIELDS,
-    _RULE_SUMMARY_MIRROR,
-    _RULE_TECH_VOCAB_DISTRIBUTION,
-)
-from app.routers.resumes import _title_blend_is_safe
-
 
 # =============================================================================
 # #1 — Last-line fill rule
@@ -91,7 +89,9 @@ class TestLastLineFill:
         }
         findings = check_writing(resume, "en")
         orphan_findings = [f for f in findings if f.rule == "low_last_line_fill"]
-        assert len(orphan_findings) >= 1, "expected an orphan finding on the 100-char bullet"
+        assert len(orphan_findings) >= 1, (
+            "expected an orphan finding on the 100-char bullet"
+        )
         assert all(f.severity == "hard" for f in orphan_findings)
 
 
@@ -102,7 +102,9 @@ class TestLastLineFill:
 
 class TestTitleBlending:
     def test_safe_blend_preserves_seniority(self) -> None:
-        assert _title_blend_is_safe("Senior AI Engineer", "Senior AI / Software Engineer")
+        assert _title_blend_is_safe(
+            "Senior AI Engineer", "Senior AI / Software Engineer"
+        )
         assert _title_blend_is_safe("Lead ML Engineer", "Lead ML / Applied AI Engineer")
 
     def test_rejects_dropped_seniority(self) -> None:
@@ -122,12 +124,8 @@ class TestTitleBlending:
 
     def test_allows_blended_when_shared_noun(self) -> None:
         """Must share at least one meaningful noun."""
-        assert _title_blend_is_safe(
-            "AI Engineer", "AI Software Engineer"
-        )
-        assert _title_blend_is_safe(
-            "Data Scientist", "Data Scientist / ML Engineer"
-        )
+        assert _title_blend_is_safe("AI Engineer", "AI Software Engineer")
+        assert _title_blend_is_safe("Data Scientist", "Data Scientist / ML Engineer")
 
     def test_schema_example_includes_title(self) -> None:
         """Prompt schema example must advertise personalInfo.title as an output."""
@@ -167,9 +165,7 @@ class TestSkillsArrayEnforcement:
     def test_preserves_existing_order(self) -> None:
         """Existing skills must stay in their original order."""
         master = {"summary": "Used Kubernetes."}
-        tailored = {
-            "additional": {"technicalSkills": ["Python", "AWS", "Docker"]}
-        }
+        tailored = {"additional": {"technicalSkills": ["Python", "AWS", "Docker"]}}
         out = _force_jd_skills_into_array(
             tailored, master, {"required_skills": ["Kubernetes"]}
         )
@@ -180,9 +176,7 @@ class TestSkillsArrayEnforcement:
     def test_deduplicates_case_insensitive(self) -> None:
         """Should NOT add kubernetes when Kubernetes is already present."""
         master = {"summary": "Used kubernetes a lot."}
-        tailored = {
-            "additional": {"technicalSkills": ["Kubernetes"]}
-        }
+        tailored = {"additional": {"technicalSkills": ["Kubernetes"]}}
         out = _force_jd_skills_into_array(
             tailored, master, {"required_skills": ["kubernetes"]}
         )
@@ -285,15 +279,16 @@ class TestEmployerLeakageScrub:
         out = _scrub_employer_leakage(tailored, {"company": "Atlassian"}, master)
         assert "Atlassian" not in out["workExperience"][0]["description"][0]
         # Bullet without the company name stays unchanged
-        assert out["workExperience"][0]["description"][1] == "Delivered 50M requests per day."
+        assert (
+            out["workExperience"][0]["description"][1]
+            == "Delivered 50M requests per day."
+        )
 
     def test_preserves_company_when_master_lists_it(self) -> None:
         """If the candidate ACTUALLY worked at the hiring company, keep refs."""
         tailored = {"summary": "Returning Atlassian engineer with 5 years."}
         master = {
-            "workExperience": [
-                {"company": "Atlassian", "description": ["prior role"]}
-            ]
+            "workExperience": [{"company": "Atlassian", "description": ["prior role"]}]
         }
         out = _scrub_employer_leakage(tailored, {"company": "Atlassian"}, master)
         assert "Atlassian" in out["summary"]

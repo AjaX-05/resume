@@ -289,7 +289,9 @@ _RULE_EM_DASH = """- Do NOT use em dash ("—") anywhere in the writing/output, 
 _RULE_SUMMARY_MIRROR = """- SUMMARY MIRRORING: Rewrite the summary as a 2-4 sentence senior-level positioning statement that mirrors the JD. First sentence MUST open with role identity + total years of experience + the single most relevant domain word from the JD title (e.g., "Senior AI/ML Engineer with 7+ years building production ML systems"). Second sentence MUST name at least 3 of the JD's key_responsibilities, phrased as capabilities the candidate has demonstrated per the master resume (e.g., if JD asks for "building RAG pipelines", "deploying to Kubernetes", "mentoring teams" — surface those exact capabilities when the master evidences them). Third sentence weaves in 3-5 JD technologies from required_skills. Keep the summary under 500 characters and never invent experience. If the master evidence doesn't support a JD responsibility, skip it rather than fabricate. The summary MUST NOT mention the hiring company's name, product names, codenames, or internal team names from the JD (per the EMPLOYER CONTEXT ISOLATION rule) — do NOT write "building GenAI platforms analogous to Rovo", "working on Jira-style systems", or similar comparisons that pin the candidate to the employer's products."""
 
 
-def _build_tailor_prompt(opening: str, specific_rules: list[str], placeholder_block: str) -> str:
+def _build_tailor_prompt(
+    opening: str, specific_rules: list[str], placeholder_block: str
+) -> str:
     """Assemble a tailoring prompt from opening + ordered Rules + placeholder block.
 
     opening: everything before the "Rules:" line (task description, truthfulness

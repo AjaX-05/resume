@@ -47,19 +47,56 @@ from app.services.apply_urls import (
 logger = logging.getLogger(__name__)
 
 _STATE_ABBREV: dict[str, str] = {
-    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
-    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
-    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
-    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
-    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
-    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
-    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
-    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
-    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
-    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
-    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
-    "WI": "Wisconsin", "WY": "Wyoming",
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
 }
 
 
@@ -87,6 +124,7 @@ _sessions: dict[str, "ApplicationSession"] = {}
 # Vault
 # ---------------------------------------------------------------------------
 
+
 def load_vault() -> dict[str, Any]:
     if _VAULT_PATH.exists():
         return json.loads(_VAULT_PATH.read_text(encoding="utf-8"))
@@ -113,7 +151,11 @@ def normalize_vault(vault: dict[str, Any]) -> dict[str, Any]:
     """
     out = dict(vault)
     raw_personal = dict(vault.get("personal") or {})
-    address = raw_personal.get("address") if isinstance(raw_personal.get("address"), dict) else {}
+    address = (
+        raw_personal.get("address")
+        if isinstance(raw_personal.get("address"), dict)
+        else {}
+    )
     name = _pick(raw_personal, "name")
     first = _pick(raw_personal, "first_name", "firstName")
     last = _pick(raw_personal, "last_name", "lastName")
@@ -136,7 +178,8 @@ def normalize_vault(vault: dict[str, Any]) -> dict[str, Any]:
         "state": _pick(raw_personal, "state") or _pick(address, "state"),
         "zip": _pick(raw_personal, "zip") or _pick(address, "zip"),
         "line1": _pick(raw_personal, "line1") or _pick(address, "line1"),
-        "address_line1": _pick(raw_personal, "address_line1", "line1") or _pick(address, "line1"),
+        "address_line1": _pick(raw_personal, "address_line1", "line1")
+        or _pick(address, "line1"),
         "country": _pick(raw_personal, "country") or _pick(address, "country") or "US",
     }
     raw_auth = dict(vault.get("work_auth") or vault.get("work_authorization") or {})
@@ -165,7 +208,9 @@ def normalize_vault(vault: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _fill_personal_from_resume(personal: dict[str, Any], resume_data: dict[str, Any]) -> None:
+def _fill_personal_from_resume(
+    personal: dict[str, Any], resume_data: dict[str, Any]
+) -> None:
     info = resume_data.get("personalInfo") if isinstance(resume_data, dict) else None
     if not isinstance(info, dict):
         return
@@ -224,6 +269,7 @@ async def prepare_vault(resume_id: str | None = None) -> dict[str, Any]:
 # Session
 # ---------------------------------------------------------------------------
 
+
 class ApplicationSession:
     def __init__(
         self,
@@ -273,6 +319,7 @@ def list_sessions() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def start_application(
     application_id: str,
@@ -325,9 +372,13 @@ def _run_apply_task_in_thread(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_apply_task(session, resume_pdf_bytes, vault))
     except Exception as exc:
-        logger.error("Apply thread died for %s: %s", session.application_id, exc, exc_info=True)
+        logger.error(
+            "Apply thread died for %s: %s", session.application_id, exc, exc_info=True
+        )
         session.status = "failed"
-        session.error = (f"{type(exc).__name__}: {exc}" if str(exc).strip() else type(exc).__name__)[:400]
+        session.error = (
+            f"{type(exc).__name__}: {exc}" if str(exc).strip() else type(exc).__name__
+        )[:400]
     finally:
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())
@@ -362,6 +413,7 @@ async def reject_application(application_id: str) -> bool:
 # Core task
 # ---------------------------------------------------------------------------
 
+
 async def _run_apply_task(
     session: ApplicationSession,
     resume_pdf_bytes: bytes,
@@ -393,7 +445,9 @@ async def _run_apply_task(
                 except Exception as exc:
                     launch_err = exc
             if browser is None:
-                raise launch_err or RuntimeError("Could not launch Chrome, Edge, or Chromium")
+                raise launch_err or RuntimeError(
+                    "Could not launch Chrome, Edge, or Chromium"
+                )
             ctx_kwargs: dict[str, Any] = {
                 "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -464,18 +518,29 @@ async def _run_apply_task(
                 filled = await _fill_dover(page, apply_url, resume_path, vault)
             elif "lever.co" in apply_url or "hire.lever.co" in apply_url:
                 filled = await _fill_lever(page, apply_url, resume_path, vault)
-            elif "ats.rippling.com" in apply_url or "recruiting.rippling.com" in apply_url:
+            elif (
+                "ats.rippling.com" in apply_url
+                or "recruiting.rippling.com" in apply_url
+            ):
                 filled = await _fill_rippling(page, apply_url, resume_path, vault)
             elif "smartrecruiters.com" in apply_url:
-                filled = await _fill_smartrecruiters(page, apply_url, resume_path, vault)
+                filled = await _fill_smartrecruiters(
+                    page, apply_url, resume_path, vault
+                )
             elif "bamboohr.com" in apply_url:
                 filled = await _fill_bamboohr(page, apply_url, resume_path, vault)
             elif "myworkdayjobs.com" in apply_url:
                 filled = await _fill_workday(page, apply_url, resume_path, vault)
-            elif apply_url.lower().startswith("mailto:") or "privateai.com" in apply_url:
-                filled = await _apply_email(page, apply_url, resume_path, vault, session)
+            elif (
+                apply_url.lower().startswith("mailto:") or "privateai.com" in apply_url
+            ):
+                filled = await _apply_email(
+                    page, apply_url, resume_path, vault, session
+                )
             else:
-                filled = await _fill_generic(page, apply_url, resume_path, vault, session)
+                filled = await _fill_generic(
+                    page, apply_url, resume_path, vault, session
+                )
 
             persist_filled_answers(filled)
             session.filled_fields = filled
@@ -530,9 +595,13 @@ async def _run_apply_task(
             session.completed_at = datetime.now(timezone.utc).isoformat()
 
     except Exception as e:
-        logger.error("Apply task failed for %s: %s", session.application_id, e, exc_info=True)
+        logger.error(
+            "Apply task failed for %s: %s", session.application_id, e, exc_info=True
+        )
         session.status = "failed"
-        session.error = (f"{type(e).__name__}: {e}" if str(e).strip() else type(e).__name__)[:400]
+        session.error = (
+            f"{type(e).__name__}: {e}" if str(e).strip() else type(e).__name__
+        )[:400]
     finally:
         try:
             Path(resume_path).unlink(missing_ok=True)
@@ -547,6 +616,7 @@ async def _run_apply_task(
 # ---------------------------------------------------------------------------
 # Aggregator URL resolver
 # ---------------------------------------------------------------------------
+
 
 async def _persist_employer_apply(application_id: str, url: str) -> None:
     try:
@@ -588,7 +658,9 @@ async def _labeled_links(page: Any) -> list[tuple[str, str]]:
                         .replace(/\\s+/g, ' ').trim()
                 }))"""
         )
-        return [(str(r.get("text") or ""), str(r.get("href") or "")) for r in (rows or [])]
+        return [
+            (str(r.get("text") or ""), str(r.get("href") or "")) for r in (rows or [])
+        ]
     except Exception:
         return []
 
@@ -683,6 +755,7 @@ async def _resolve_aggregator_url(
     if is_jobright:
         cookie_header = vault.get("jobright", {}).get("session_cookie", "") or ""
         import os
+
         if not cookie_header:
             cookie_header = os.environ.get("JOBRIGHT_MANUAL_COOKIE", "")
         if cookie_header:
@@ -690,12 +763,14 @@ async def _resolve_aggregator_url(
             for part in cookie_header.split(";"):
                 if "=" in part:
                     name, _, val = part.strip().partition("=")
-                    cookies.append({
-                        "name": name.strip(),
-                        "value": val.strip(),
-                        "domain": ".jobright.ai",
-                        "path": "/",
-                    })
+                    cookies.append(
+                        {
+                            "name": name.strip(),
+                            "value": val.strip(),
+                            "domain": ".jobright.ai",
+                            "path": "/",
+                        }
+                    )
             if cookies:
                 try:
                     await page.context.add_cookies(cookies)
@@ -827,10 +902,24 @@ async def _fill_greenhouse(
     first = personal.get("first_name", "")
     last = personal.get("last_name", "")
 
-    await try_fill("input#first_name, input[name='job_application[first_name]']", first, "first_name")
-    await try_fill("input#last_name, input[name='job_application[last_name]']", last, "last_name")
-    await try_fill("input#email, input[name='job_application[email]']", personal.get("email", ""), "email")
-    await try_fill("input#phone, input[name='job_application[phone]']", personal.get("phone", ""), "phone")
+    await try_fill(
+        "input#first_name, input[name='job_application[first_name]']",
+        first,
+        "first_name",
+    )
+    await try_fill(
+        "input#last_name, input[name='job_application[last_name]']", last, "last_name"
+    )
+    await try_fill(
+        "input#email, input[name='job_application[email]']",
+        personal.get("email", ""),
+        "email",
+    )
+    await try_fill(
+        "input#phone, input[name='job_application[phone]']",
+        personal.get("phone", ""),
+        "phone",
+    )
 
     # Location — try several selectors
     location_val = f"{personal.get('city', '')}, {personal.get('state', '')}"
@@ -839,7 +928,8 @@ async def _fill_greenhouse(
         "input[placeholder*='location' i], "
         "input[placeholder*='city' i], "
         "input[autocomplete='off'][id*='location']",
-        location_val, "location"
+        location_val,
+        "location",
     )
 
     # Address
@@ -850,7 +940,8 @@ async def _fill_greenhouse(
             "input[placeholder*='address' i], "
             "input[placeholder*='street' i], "
             "input[autocomplete*='address' i]",
-            address, "address"
+            address,
+            "address",
         )
 
     # LinkedIn — vault and resume use `linkedin`, older adapters used `linkedin_url`
@@ -861,18 +952,24 @@ async def _fill_greenhouse(
             "input[name*='linkedin' i], "
             "input[id*='linkedin' i], "
             "input[aria-label*='linkedin' i]",
-            linkedin, "linkedin"
+            linkedin,
+            "linkedin",
         )
 
     # GitHub / portfolio — only fill if explicitly set (null means user has none)
-    github = personal.get("github") or personal.get("github_url") or personal.get("portfolio_url")
+    github = (
+        personal.get("github")
+        or personal.get("github_url")
+        or personal.get("portfolio_url")
+    )
     if github:
         await try_fill(
             "input[placeholder*='github' i], "
             "input[placeholder*='portfolio' i], "
             "input[placeholder*='website' i], "
             "input[name*='website' i]",
-            github, "website"
+            github,
+            "website",
         )
 
     # Resume upload
@@ -891,7 +988,9 @@ async def _fill_greenhouse(
         or answer_for(vault, "how did you hear about this job")
         or "Online job board"
     )
-    await _answer_question_by_label(page, ["how did you hear", "how did you find", "referred by"], heard, filled)
+    await _answer_question_by_label(
+        page, ["how did you hear", "how did you find", "referred by"], heard, filled
+    )
 
     await _fill_employment_from_resume(page, vault, filled)
 
@@ -937,27 +1036,70 @@ async def _fill_all_custom_questions(
 
     # label substring patterns → answer string
     answer_map: list[tuple[list[str], str]] = [
-        (["authorized to work", "legally authorized", "work in the united states",
-          "work in united states", "eligible to work"],
-         "Yes" if authorized else "No"),
-        (["require.*sponsorship", "visa sponsorship", "require an employment visa",
-          "sponsorship.*employment", "require sponsorship", "will you now"],
-         "Yes" if needs_sponsor else "No"),
+        (
+            [
+                "authorized to work",
+                "legally authorized",
+                "work in the united states",
+                "work in united states",
+                "eligible to work",
+            ],
+            "Yes" if authorized else "No",
+        ),
+        (
+            [
+                "require.*sponsorship",
+                "visa sponsorship",
+                "require an employment visa",
+                "sponsorship.*employment",
+                "require sponsorship",
+                "will you now",
+            ],
+            "Yes" if needs_sponsor else "No",
+        ),
         (["physical address", "mailing address", "street address"], address),
         (["linkedin"], personal.get("linkedin") or personal.get("linkedin_url") or ""),
-        (["gender identity", "describe your gender"], eeo.get("gender") or eeo.get("gender_identity") or "Decline to self-identify"),
-        (["racial", "ethnic background", "race/ethni", "racial/ethnic", "african american"],
-         eeo.get("ethnicity") or eeo.get("race_ethnicity") or "Decline to self-identify"),
-        (["sexual orientation"], eeo.get("sexual_orientation") or "Decline to self-identify"),
+        (
+            ["gender identity", "describe your gender"],
+            eeo.get("gender")
+            or eeo.get("gender_identity")
+            or "Decline to self-identify",
+        ),
+        (
+            [
+                "racial",
+                "ethnic background",
+                "race/ethni",
+                "racial/ethnic",
+                "african american",
+            ],
+            eeo.get("ethnicity")
+            or eeo.get("race_ethnicity")
+            or "Decline to self-identify",
+        ),
+        (
+            ["sexual orientation"],
+            eeo.get("sexual_orientation") or "Decline to self-identify",
+        ),
         (["identify as transgender", "transgender"], "No"),
-        (["disability", "chronic condition"], eeo.get("disability") or eeo.get("disability_status") or "I don't wish to answer"),
-        (["veteran", "armed forces", "military service"],
-         eeo.get("veteran_status") or "Decline to self-identify"),
+        (
+            ["disability", "chronic condition"],
+            eeo.get("disability")
+            or eeo.get("disability_status")
+            or "I don't wish to answer",
+        ),
+        (
+            ["veteran", "armed forces", "military service"],
+            eeo.get("veteran_status") or "Decline to self-identify",
+        ),
         (["hispanic", "latino"], "No"),
         (["how did you hear", "how did you find"], "Online job board"),
         # "Do you currently reside in any of the following states?" → Texas
         # States question — use full name since Greenhouse combobox shows "Texas" not "TX"
-        (["reside in any", "which states", "currently reside"], _state_full_name(personal.get("state", "TX"))),
+        (
+            ["reside in any", "which states", "currently reside"],
+            _state_full_name(personal.get("state", "TX")),
+        ),
     ]
 
     labels = await page.locator("label").all()
@@ -1025,7 +1167,13 @@ async def _fill_all_custom_questions(
                         filled[f"q_{for_id[:20]}"] = matched_answer
                         break
 
-            elif tag == "INPUT" and input_type in ("text", "email", "tel", "search", ""):
+            elif tag == "INPUT" and input_type in (
+                "text",
+                "email",
+                "tel",
+                "search",
+                "",
+            ):
                 await el.fill(matched_answer)
                 filled[f"q_{for_id[:20]}"] = matched_answer
 
@@ -1059,6 +1207,7 @@ async def _fill_all_custom_questions(
 # Shared helper: fill standard fields on any React-based ATS form
 # ---------------------------------------------------------------------------
 
+
 async def _fill_standard_fields(
     page: Any,
     vault: dict[str, Any],
@@ -1082,7 +1231,9 @@ async def _fill_standard_fields(
     every ATS variant.
     """
     personal = vault.get("personal", {})
-    full_name = f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+    full_name = (
+        f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+    )
 
     async def _try_fill(value: str, key: str, *selectors: str) -> bool:
         """Try each selector in order; return True on first match."""
@@ -1117,32 +1268,37 @@ async def _fill_standard_fields(
 
     # Full name (single field)
     await _try_fill(
-        full_name, "name",
+        full_name,
+        "name",
         full_name_selector,
         *_aria_sels(["full name", "legal name", "your name", "fullname"]),
     )
     # First name
     await _try_fill(
-        personal.get("first_name", ""), "first_name",
+        personal.get("first_name", ""),
+        "first_name",
         first_name_selector,
         *_aria_sels(["first name", "firstname", "given name"]),
     )
     # Last name
     await _try_fill(
-        personal.get("last_name", ""), "last_name",
+        personal.get("last_name", ""),
+        "last_name",
         last_name_selector,
         *_aria_sels(["last name", "lastname", "surname", "family name"]),
     )
     # Email
     await _try_fill(
-        personal.get("email", ""), "email",
+        personal.get("email", ""),
+        "email",
         email_selector,
         "input[type='email']",
         *_aria_sels(["email", "e-mail"]),
     )
     # Phone
     await _try_fill(
-        personal.get("phone", ""), "phone",
+        personal.get("phone", ""),
+        "phone",
         phone_selector,
         "input[type='tel']",
         *_aria_sels(["phone", "mobile", "telephone"]),
@@ -1150,13 +1306,15 @@ async def _fill_standard_fields(
     linkedin = personal.get("linkedin") or personal.get("linkedin_url") or ""
     if linkedin:
         await _try_fill(
-            linkedin, "linkedin",
+            linkedin,
+            "linkedin",
             linkedin_selector,
             *_aria_sels(["linkedin", "linkedin url", "linkedin profile"]),
         )
     # City / location
     await _try_fill(
-        personal.get("city", ""), "city",
+        personal.get("city", ""),
+        "city",
         location_selector,
         *_aria_sels(["city", "location", "where are you", "current location"]),
     )
@@ -1185,7 +1343,9 @@ async def _wait_for_form(page: Any, timeout_ms: int = 12_000) -> None:
         "form",
     ]:
         try:
-            await page.wait_for_selector(selector, timeout=timeout_ms // len([1, 2, 3, 4, 5]))
+            await page.wait_for_selector(
+                selector, timeout=timeout_ms // len([1, 2, 3, 4, 5])
+            )
             return
         except Exception:
             pass
@@ -1223,6 +1383,7 @@ async def _js_dispatch_fill(page: Any, selector: str, value: str) -> bool:
 # Gem adapter  (jobs.gem.com)  — 8% of startups
 # ---------------------------------------------------------------------------
 
+
 async def _fill_gem(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
 ) -> dict[str, str]:
@@ -1241,7 +1402,9 @@ async def _fill_gem(
     # JS-dispatch fallback for any field that Playwright fill() missed
     personal = vault.get("personal", {})
     if "email" not in filled:
-        ok = await _js_dispatch_fill(page, "input[type='email']", personal.get("email", ""))
+        ok = await _js_dispatch_fill(
+            page, "input[type='email']", personal.get("email", "")
+        )
         if ok:
             filled["email_js"] = personal.get("email", "")
 
@@ -1254,6 +1417,7 @@ async def _fill_gem(
 # ---------------------------------------------------------------------------
 # Workable adapter  (apply.workable.com)  — 7% of startups
 # ---------------------------------------------------------------------------
+
 
 async def _fill_workable(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
@@ -1294,7 +1458,10 @@ async def _fill_workable(
 
     # Workable-specific: fields sometimes named with ui-* data attributes
     await _fill_standard_fields(
-        page, vault, resume_path, filled,
+        page,
+        vault,
+        resume_path,
+        filled,
         first_name_selector="input[name='firstname'], input[name='first_name']",
         last_name_selector="input[name='lastname'], input[name='last_name']",
         email_selector="input[name='email']",
@@ -1303,7 +1470,9 @@ async def _fill_workable(
 
     # JS fallback
     if "email" not in filled and personal.get("email"):
-        await _js_dispatch_fill(page, "input[type='email'], input[name='email']", personal["email"])
+        await _js_dispatch_fill(
+            page, "input[type='email'], input[name='email']", personal["email"]
+        )
         filled["email_js"] = personal["email"]
 
     await _fill_all_custom_questions(
@@ -1315,6 +1484,7 @@ async def _fill_workable(
 # ---------------------------------------------------------------------------
 # Dover adapter  (app.dover.com)  — 6% of startups
 # ---------------------------------------------------------------------------
+
 
 async def _fill_dover(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
@@ -1342,7 +1512,9 @@ async def _fill_dover(
             ("phone", personal.get("phone", "")),
         ]:
             if aria not in filled and val:
-                ok = await _js_dispatch_fill(page, f"input[aria-label*='{aria}' i], input[type='{aria}']", val)
+                ok = await _js_dispatch_fill(
+                    page, f"input[aria-label*='{aria}' i], input[type='{aria}']", val
+                )
                 if ok:
                     filled[f"{aria}_js"] = val
 
@@ -1366,6 +1538,7 @@ async def _fill_dover(
 # ---------------------------------------------------------------------------
 # Rippling adapter  (ats.rippling.com)  — 4% of startups
 # ---------------------------------------------------------------------------
+
 
 async def _fill_rippling(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
@@ -1401,7 +1574,10 @@ async def _fill_rippling(
 
     # Rippling data-testid selectors (most specific — try first)
     await _fill_standard_fields(
-        page, vault, resume_path, filled,
+        page,
+        vault,
+        resume_path,
+        filled,
         first_name_selector="input[data-testid='firstName'], input[data-testid='first-name']",
         last_name_selector="input[data-testid='lastName'], input[data-testid='last-name']",
         email_selector="input[data-testid='email']",
@@ -1412,9 +1588,14 @@ async def _fill_rippling(
     await _fill_standard_fields(page, vault, resume_path, filled, use_aria=True)
 
     # JS dispatch for anything still missed
-    for key, val in [("email", personal.get("email", "")), ("phone", personal.get("phone", ""))]:
+    for key, val in [
+        ("email", personal.get("email", "")),
+        ("phone", personal.get("phone", "")),
+    ]:
         if key not in filled and val:
-            ok = await _js_dispatch_fill(page, f"input[type='{key}'], input[name='{key}']", val)
+            ok = await _js_dispatch_fill(
+                page, f"input[type='{key}'], input[name='{key}']", val
+            )
             if ok:
                 filled[f"{key}_js"] = val
 
@@ -1427,6 +1608,7 @@ async def _fill_rippling(
 # ---------------------------------------------------------------------------
 # SmartRecruiters adapter  — ~3–5% of postings
 # ---------------------------------------------------------------------------
+
 
 async def _fill_smartrecruiters(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
@@ -1464,7 +1646,10 @@ async def _fill_smartrecruiters(
 
     # data-smarttoken selectors — SmartRecruiters' own attribute (most reliable)
     await _fill_standard_fields(
-        page, vault, resume_path, filled,
+        page,
+        vault,
+        resume_path,
+        filled,
         first_name_selector="input[data-smarttoken='firstName'], input[name='firstName']",
         last_name_selector="input[data-smarttoken='lastName'], input[name='lastName']",
         email_selector="input[data-smarttoken='email'], input[name='email']",
@@ -1493,6 +1678,7 @@ async def _fill_smartrecruiters(
 # BambooHR adapter  (~3–4% of postings)
 # ---------------------------------------------------------------------------
 
+
 async def _fill_bamboohr(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
 ) -> dict[str, str]:
@@ -1510,7 +1696,10 @@ async def _fill_bamboohr(
     await page.wait_for_timeout(2000)
 
     await _fill_standard_fields(
-        page, vault, resume_path, filled,
+        page,
+        vault,
+        resume_path,
+        filled,
         first_name_selector="input#firstName, input[name='firstName']",
         last_name_selector="input#lastName, input[name='lastName']",
         email_selector="input#email, input[name='email']",
@@ -1551,7 +1740,8 @@ async def _answer_work_auth_questions(
         "will you now": "Yes" if needs_sponsor else "No",
     }
 
-    result = await page.evaluate("""
+    result = await page.evaluate(
+        """
         (answerMap) => {
             const filled = {};
             // Scan every container that might hold a custom question
@@ -1599,7 +1789,9 @@ async def _answer_work_auth_questions(
             });
             return filled;
         }
-    """, answer_map)
+    """,
+        answer_map,
+    )
 
     if isinstance(result, dict):
         filled.update({f"work_auth_{k}": v for k, v in result.items()})
@@ -1632,7 +1824,8 @@ async def _answer_eeo_questions(
     # Filter empty values
     eeo_map = {k: v for k, v in eeo_map.items() if v}
 
-    result = await page.evaluate("""
+    result = await page.evaluate(
+        """
         (eeoMap) => {
             const filled = {};
             const selects = document.querySelectorAll('select');
@@ -1663,7 +1856,9 @@ async def _answer_eeo_questions(
             });
             return filled;
         }
-    """, eeo_map)
+    """,
+        eeo_map,
+    )
 
     if isinstance(result, dict):
         filled.update(result)
@@ -1729,10 +1924,18 @@ async def _click_submit(page: Any) -> bool:
     """Click the submit button on the form — not a listing-page Apply link."""
     try:
         body = (await page.inner_text("body")).lower()
-        if any(
-            p in body
-            for p in ("create account", "forgot password", "verify your email", "sign in to")
-        ) and await page.locator("input[type='file']").count() == 0:
+        if (
+            any(
+                p in body
+                for p in (
+                    "create account",
+                    "forgot password",
+                    "verify your email",
+                    "sign in to",
+                )
+            )
+            and await page.locator("input[type='file']").count() == 0
+        ):
             return False
     except Exception:
         pass
@@ -1768,6 +1971,7 @@ async def _click_submit(page: Any) -> bool:
 # Lever adapter (Phase 2 stub)
 # ---------------------------------------------------------------------------
 
+
 async def _fill_lever(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
 ) -> dict[str, str]:
@@ -1800,12 +2004,16 @@ async def _fill_lever(
         except Exception:
             pass
 
-    full_name = f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+    full_name = (
+        f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+    )
     await lever_fill("input[name='name']", full_name, "name")
     await lever_fill("input[name='email']", personal.get("email", ""), "email")
     await lever_fill("input[name='phone']", personal.get("phone", ""), "phone")
     await lever_fill("input[name='org']", "NMDP", "current_company")
-    await lever_fill("input[name='urls[LinkedIn]']", personal.get("linkedin_url", ""), "linkedin")
+    await lever_fill(
+        "input[name='urls[LinkedIn]']", personal.get("linkedin_url", ""), "linkedin"
+    )
 
     # Resume upload
     try:
@@ -1826,6 +2034,7 @@ async def _fill_lever(
 # ---------------------------------------------------------------------------
 # Ashby adapter
 # ---------------------------------------------------------------------------
+
 
 async def _fill_ashby(
     page: Any, apply_url: str, resume_path: str, vault: dict[str, Any]
@@ -1851,7 +2060,9 @@ async def _fill_ashby(
         pass
     await page.wait_for_timeout(2000)
 
-    full_name = f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+    full_name = (
+        f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+    )
 
     async def ashby_fill(patterns: list[str], value: str, key: str) -> None:
         if not value:
@@ -1924,17 +2135,26 @@ async def _set_control_value(el: Any, value: str) -> bool:
             target = value.lower()
             for opt in opts:
                 opt_text = (await opt.inner_text()).strip()
-                if opt_text and (target in opt_text.lower() or opt_text.lower() in target):
+                if opt_text and (
+                    target in opt_text.lower() or opt_text.lower() in target
+                ):
                     await el.select_option(label=opt_text)
                     return True
             return False
-        if input_type in {"checkbox", "radio"} or tag == "input" and input_type in {"checkbox", "radio"}:
+        if (
+            input_type in {"checkbox", "radio"}
+            or tag == "input"
+            and input_type in {"checkbox", "radio"}
+        ):
             if value.lower() in {"yes", "true", "on", "1"}:
                 if not await el.is_checked():
                     await el.check()
                 return True
             return False
-        if role == "combobox" or (await el.get_attribute("aria-haspopup") or "") in {"true", "listbox"}:
+        if role == "combobox" or (await el.get_attribute("aria-haspopup") or "") in {
+            "true",
+            "listbox",
+        }:
             page = el.page
             await el.click()
             await page.wait_for_timeout(400)
@@ -1944,7 +2164,9 @@ async def _set_control_value(el: Any, value: str) -> bool:
             for i in range(count):
                 opt = opts.nth(i)
                 opt_text = (await opt.inner_text()).strip()
-                if opt_text and (target in opt_text.lower() or opt_text.lower() in target):
+                if opt_text and (
+                    target in opt_text.lower() or opt_text.lower() in target
+                ):
                     await opt.click()
                     return True
             await page.keyboard.press("Escape")
@@ -1961,7 +2183,9 @@ _HONEYPOT_RE = re.compile(
 )
 
 
-async def _fill_from_answer_bank(page: Any, vault: dict[str, Any], filled: dict[str, str]) -> None:
+async def _fill_from_answer_bank(
+    page: Any, vault: dict[str, Any], filled: dict[str, str]
+) -> None:
     """Walk every label on the page and reuse vault / resume answers."""
     labels = await page.locator("label").all()
     for label in labels:
@@ -1984,13 +2208,19 @@ async def _fill_from_answer_bank(page: Any, vault: dict[str, Any], filled: dict[
                 if await loc.count() > 0:
                     el = loc
             if el is None:
-                inner = label.locator("input, textarea, select, [role='combobox']").first
+                inner = label.locator(
+                    "input, textarea, select, [role='combobox']"
+                ).first
                 if await inner.count() > 0:
                     el = inner
             if el is None:
                 # following control in the same field wrapper
-                parent = label.locator("xpath=ancestor::*[self::div or self::li or self::fieldset][1]")
-                nearby = parent.locator("input, textarea, select, [role='combobox']").first
+                parent = label.locator(
+                    "xpath=ancestor::*[self::div or self::li or self::fieldset][1]"
+                )
+                nearby = parent.locator(
+                    "input, textarea, select, [role='combobox']"
+                ).first
                 if await nearby.count() > 0:
                     el = nearby
             if el is None:
@@ -2023,8 +2253,14 @@ async def _fill_from_answer_bank(page: Any, vault: dict[str, Any], filled: dict[
             continue
 
 
-async def _fill_employment_from_resume(page: Any, vault: dict[str, Any], filled: dict[str, str]) -> None:
-    history = vault.get("_work_history") if isinstance(vault.get("_work_history"), list) else []
+async def _fill_employment_from_resume(
+    page: Any, vault: dict[str, Any], filled: dict[str, str]
+) -> None:
+    history = (
+        vault.get("_work_history")
+        if isinstance(vault.get("_work_history"), list)
+        else []
+    )
     if not history:
         return
     row = history[0]
@@ -2050,7 +2286,9 @@ async def _fill_employment_from_resume(page: Any, vault: dict[str, Any], filled:
             pass
 
 
-async def _click_first_visible(page: Any, selectors: list[str], timeout_ms: int = 2500) -> bool:
+async def _click_first_visible(
+    page: Any, selectors: list[str], timeout_ms: int = 2500
+) -> bool:
     for sel in selectors:
         try:
             loc = page.locator(sel).first
@@ -2111,7 +2349,11 @@ async def _fill_google_login(page: Any, email: str, password: str) -> None:
             await page.wait_for_timeout(3000)
         await _click_first_visible(
             page,
-            ["button:has-text('Continue')", "button:has-text('I agree')", "button:has-text('Allow')"],
+            [
+                "button:has-text('Continue')",
+                "button:has-text('I agree')",
+                "button:has-text('Allow')",
+            ],
         )
         await page.wait_for_timeout(1500)
     except Exception as exc:
@@ -2152,7 +2394,9 @@ async def _jobright_login(page: Any, vault: dict[str, Any]) -> None:
     """
     jr = vault.get("jobright") if isinstance(vault.get("jobright"), dict) else {}
     personal = vault.get("personal") if isinstance(vault.get("personal"), dict) else {}
-    creds = vault.get("credentials") if isinstance(vault.get("credentials"), dict) else {}
+    creds = (
+        vault.get("credentials") if isinstance(vault.get("credentials"), dict) else {}
+    )
     email = str(jr.get("email") or personal.get("email") or "").strip()
     password = str(jr.get("password") or creds.get("password") or "").strip()
     if password == "********":
@@ -2176,7 +2420,9 @@ async def _jobright_login(page: Any, vault: dict[str, Any]) -> None:
             ],
         )
         if not opened:
-            await page.goto("https://jobright.ai/", wait_until="domcontentloaded", timeout=25_000)
+            await page.goto(
+                "https://jobright.ai/", wait_until="domcontentloaded", timeout=25_000
+            )
             await page.wait_for_timeout(1500)
             await _click_first_visible(
                 page,
@@ -2200,7 +2446,11 @@ async def _jobright_login(page: Any, vault: dict[str, Any]) -> None:
             else:
                 await _click_first_visible(
                     page,
-                    ["button:has-text('Continue')", "button:has-text('Next')", "button[type='submit']"],
+                    [
+                        "button:has-text('Continue')",
+                        "button:has-text('Next')",
+                        "button[type='submit']",
+                    ],
                 )
                 await page.wait_for_timeout(800)
                 pw_el = page.locator("input[type='password']").first
@@ -2237,8 +2487,8 @@ def _smtp_send_application(
     summary: str,
 ) -> None:
     import smtplib
-    from email.message import EmailMessage
     import urllib.parse
+    from email.message import EmailMessage
 
     parsed = urllib.parse.urlparse(mailto_url)
     to_addr = parsed.path
@@ -2255,7 +2505,9 @@ def _smtp_send_application(
         f"{intro}\n\nThank you,\n{full_name}\n"
     )
     with open(resume_path, "rb") as fh:
-        msg.add_attachment(fh.read(), maintype="application", subtype="pdf", filename="resume.pdf")
+        msg.add_attachment(
+            fh.read(), maintype="application", subtype="pdf", filename="resume.pdf"
+        )
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
         smtp.login(gmail, app_password)
         smtp.send_message(msg)
@@ -2279,16 +2531,25 @@ def _imap_otp(gmail: str, app_password: str, sender_hint: str = "workday") -> st
                 continue
             msg = email_lib.message_from_bytes(raw[0][1])
             blob = f"{msg.get('From', '')} {msg.get('Subject', '')}"
-            if sender_hint.lower() not in blob.lower() and "myworkday" not in blob.lower():
+            if (
+                sender_hint.lower() not in blob.lower()
+                and "myworkday" not in blob.lower()
+            ):
                 continue
             body = ""
             if msg.is_multipart():
                 for part in msg.walk():
                     if part.get_content_type() == "text/plain":
-                        body += part.get_payload(decode=True).decode("utf-8", errors="replace")
+                        body += part.get_payload(decode=True).decode(
+                            "utf-8", errors="replace"
+                        )
             else:
                 payload = msg.get_payload(decode=True)
-                body = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else str(payload)
+                body = (
+                    payload.decode("utf-8", errors="replace")
+                    if isinstance(payload, bytes)
+                    else str(payload)
+                )
             found = re.search(r"\b(\d{6})\b", body)
             if found:
                 return found.group(1)
@@ -2317,12 +2578,19 @@ async def _apply_email(
                 """() => Array.from(document.querySelectorAll('a[href]'))
                     .map(a => a.getAttribute('href') || '')"""
             )
-            mailto = extract_mailto(apply_url) or extract_mailto(" ".join(hrefs or [])) or extract_mailto(html)
+            mailto = (
+                extract_mailto(apply_url)
+                or extract_mailto(" ".join(hrefs or []))
+                or extract_mailto(html)
+            )
         except Exception as exc:
             logger.debug("Email-apply page fetch failed: %s", exc)
             mailto = extract_mailto(apply_url)
     if not mailto:
-        return {"site": "email", "note": "careers page has no application form or mailto link"}
+        return {
+            "site": "email",
+            "note": "careers page has no application form or mailto link",
+        }
     gmail, app_password = gmail_credentials(vault)
     if not gmail or not app_password:
         raise RuntimeError(
@@ -2340,7 +2608,8 @@ async def _apply_email(
         resume_path,
         session.company,
         session.role,
-        derived.get("full_name") or f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip(),
+        derived.get("full_name")
+        or f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip(),
         derived.get("summary") or "",
     )
     to_addr = mailto.split("?", 1)[0].replace("mailto:", "")
@@ -2482,7 +2751,9 @@ async def _workday_auth(
         )
         return
     try:
-        create_btn = page.locator("[data-automation-id='createAccountSubmitButton']").first
+        create_btn = page.locator(
+            "[data-automation-id='createAccountSubmitButton']"
+        ).first
         if await create_btn.count() > 0 and await create_btn.is_visible():
             await _workday_fill_email_password(page, email, password)
             box = page.locator("[data-automation-id='createAccountCheckbox']").first
@@ -2528,7 +2799,9 @@ async def _workday_auth(
                 ).first
                 if await otp_el.count() > 0:
                     await otp_el.fill(otp)
-                    verify_btn = page.locator("button:has-text('Verify'), button[type='submit']").first
+                    verify_btn = page.locator(
+                        "button:has-text('Verify'), button[type='submit']"
+                    ).first
                     if await verify_btn.count() > 0:
                         await verify_btn.click()
                         await page.wait_for_timeout(2500)
@@ -2553,13 +2826,18 @@ async def _fill_workday(
     await _workday_click_apply(page)
 
     personal = vault.get("personal") if isinstance(vault.get("personal"), dict) else {}
-    creds = vault.get("credentials") if isinstance(vault.get("credentials"), dict) else {}
+    creds = (
+        vault.get("credentials") if isinstance(vault.get("credentials"), dict) else {}
+    )
     email = str(personal.get("email") or "").strip()
     password = str(creds.get("password") or "").strip()
     if password == "********":
         password = ""
 
-    if await _workday_still_on_login(page) or await page.locator("input[type='password']").count() > 0:
+    if (
+        await _workday_still_on_login(page)
+        or await page.locator("input[type='password']").count() > 0
+    ):
         await _workday_auth(page, email, password, vault, filled)
         try:
             await page.wait_for_selector("input[type='file']", timeout=12_000)
@@ -2606,4 +2884,3 @@ async def _fill_workday(
             "Workday login wall — could not reach the application form.",
         )
     return filled
-

@@ -4,6 +4,7 @@ Every application asks the same core questions (name, phone, work auth, LinkedIn
 "how did you hear", signature). We answer them from the vault first, then from
 the tailored resume, then from answers learned on earlier forms.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,27 +45,67 @@ _ALIAS: list[tuple[list[str], str]] = [
     (["state / province", "state/province", "province"], "personal.state"),
     (["zip", "postal"], "personal.zip"),
     (["country"], "personal.country"),
-    (["street", "address line", "mailing address", "physical address"], "personal.line1"),
-    (["location (city", "current location", "where are you", "city, state"], "derived.location"),
+    (
+        ["street", "address line", "mailing address", "physical address"],
+        "personal.line1",
+    ),
+    (
+        ["location (city", "current location", "where are you", "city, state"],
+        "derived.location",
+    ),
     (["signature", "type your name", "electronic signature"], "derived.full_name"),
-    (["authorized to work", "legally authorized", "eligible to work", "work in the united states"], "derived.authorized"),
-    (["sponsorship", "require an employment visa", "will you now or in the future"], "derived.sponsorship"),
-    (["visa status", "work authorization status", "immigration"], "work_auth.visa_status"),
-    (["how did you hear", "how did you find", "how you heard", "referred by"], "derived.how_heard"),
+    (
+        [
+            "authorized to work",
+            "legally authorized",
+            "eligible to work",
+            "work in the united states",
+        ],
+        "derived.authorized",
+    ),
+    (
+        ["sponsorship", "require an employment visa", "will you now or in the future"],
+        "derived.sponsorship",
+    ),
+    (
+        ["visa status", "work authorization status", "immigration"],
+        "work_auth.visa_status",
+    ),
+    (
+        ["how did you hear", "how did you find", "how you heard", "referred by"],
+        "derived.how_heard",
+    ),
     (["gender identity", "describe your gender", "gender"], "eeo.gender"),
     (["hispanic", "latino"], "derived.hispanic"),
     (["racial", "ethnic", "race/ethni", "african american", "black"], "eeo.ethnicity"),
     (["veteran", "armed forces", "military service"], "eeo.veteran_status"),
     (["disability", "chronic condition"], "eeo.disability"),
     (["sexual orientation"], "eeo.sexual_orientation"),
-    (["current company", "most recent employer", "employer name", "company name"], "derived.current_company"),
-    (["current title", "job title", "most recent title", "position title"], "derived.current_title"),
+    (
+        ["current company", "most recent employer", "employer name", "company name"],
+        "derived.current_company",
+    ),
+    (
+        ["current title", "job title", "most recent title", "position title"],
+        "derived.current_title",
+    ),
     (["start date", "from date"], "derived.start_date"),
     (["end date"], "derived.end_date"),
     (["degree", "highest education"], "derived.degree"),
     (["school", "university", "college", "institution"], "derived.school"),
-    (["tell us about a project", "describe a project", "relevant project", "project you"], "derived.project"),
-    (["tell us about yourself", "cover letter", "why do you want", "why this role"], "derived.summary"),
+    (
+        [
+            "tell us about a project",
+            "describe a project",
+            "relevant project",
+            "project you",
+        ],
+        "derived.project",
+    ),
+    (
+        ["tell us about yourself", "cover letter", "why do you want", "why this role"],
+        "derived.summary",
+    ),
     (["years of experience", "years experience"], "derived.years_experience"),
 ]
 
@@ -115,20 +156,34 @@ def _bullets(value: Any) -> list[str]:
     return []
 
 
-def resume_derived(resume_data: dict[str, Any] | None, personal: dict[str, Any]) -> dict[str, str]:
+def resume_derived(
+    resume_data: dict[str, Any] | None, personal: dict[str, Any]
+) -> dict[str, str]:
     """Turn the tailored resume into answers for project / employment questions."""
     data = resume_data if isinstance(resume_data, dict) else {}
-    info = data.get("personalInfo") if isinstance(data.get("personalInfo"), dict) else {}
-    work = data.get("workExperience") if isinstance(data.get("workExperience"), list) else []
+    info = (
+        data.get("personalInfo") if isinstance(data.get("personalInfo"), dict) else {}
+    )
+    work = (
+        data.get("workExperience")
+        if isinstance(data.get("workExperience"), list)
+        else []
+    )
     education = data.get("education") if isinstance(data.get("education"), list) else []
-    projects = data.get("personalProjects") if isinstance(data.get("personalProjects"), list) else []
+    projects = (
+        data.get("personalProjects")
+        if isinstance(data.get("personalProjects"), list)
+        else []
+    )
 
     first = personal.get("first_name") or ""
     last = personal.get("last_name") or ""
     full = f"{first} {last}".strip() or str(info.get("name") or "").strip()
     city = personal.get("city") or ""
     state = personal.get("state") or ""
-    location = str(info.get("location") or "").strip() or ", ".join(p for p in (city, state) if p)
+    location = str(info.get("location") or "").strip() or ", ".join(
+        p for p in (city, state) if p
+    )
 
     current_company = current_title = start_date = end_date = ""
     current_role = False
@@ -137,7 +192,9 @@ def resume_derived(resume_data: dict[str, Any] | None, personal: dict[str, Any])
         latest = work[0] if isinstance(work[0], dict) else {}
         current_company = str(latest.get("company") or "").strip()
         current_title = str(latest.get("title") or latest.get("position") or "").strip()
-        start_date, end_date, current_role = _parse_years(str(latest.get("years") or ""))
+        start_date, end_date, current_role = _parse_years(
+            str(latest.get("years") or "")
+        )
         project_bits.extend(_bullets(latest.get("description"))[:3])
     for proj in projects[:2]:
         if not isinstance(proj, dict):
@@ -153,7 +210,9 @@ def resume_derived(resume_data: dict[str, Any] | None, personal: dict[str, Any])
 
     school = degree = ""
     if education and isinstance(education[0], dict):
-        school = str(education[0].get("institution") or education[0].get("school") or "").strip()
+        school = str(
+            education[0].get("institution") or education[0].get("school") or ""
+        ).strip()
         degree = str(education[0].get("degree") or "").strip()
 
     years_exp = ""
@@ -189,7 +248,11 @@ def resume_derived(resume_data: dict[str, Any] | None, personal: dict[str, Any])
 def work_history(resume_data: dict[str, Any] | None) -> list[dict[str, str]]:
     data = resume_data if isinstance(resume_data, dict) else {}
     rows: list[dict[str, str]] = []
-    work = data.get("workExperience") if isinstance(data.get("workExperience"), list) else []
+    work = (
+        data.get("workExperience")
+        if isinstance(data.get("workExperience"), list)
+        else []
+    )
     for item in work:
         if not isinstance(item, dict):
             continue
@@ -232,7 +295,11 @@ def answer_for(vault: dict[str, Any], question: str) -> str:
     if key in learned and str(learned[key]).strip():
         return str(learned[key]).strip()
     for stored_key, stored_val in learned.items():
-        if stored_key and (stored_key in key or key in stored_key) and str(stored_val).strip():
+        if (
+            stored_key
+            and (stored_key in key or key in stored_key)
+            and str(stored_val).strip()
+        ):
             return str(stored_val).strip()
     aliased = _alias_answer(vault, key)
     if aliased:
@@ -256,7 +323,9 @@ def answer_for(vault: dict[str, Any], question: str) -> str:
     return ""
 
 
-def attach_resume(vault: dict[str, Any], resume_data: dict[str, Any] | None) -> dict[str, Any]:
+def attach_resume(
+    vault: dict[str, Any], resume_data: dict[str, Any] | None
+) -> dict[str, Any]:
     """Runtime-only: derived answers + work history. Not written back to disk."""
     out = dict(vault)
     personal = dict(out.get("personal") or {})
@@ -264,7 +333,11 @@ def attach_resume(vault: dict[str, Any], resume_data: dict[str, Any] | None) -> 
     auth = out.get("work_auth") if isinstance(out.get("work_auth"), dict) else {}
     derived["authorized"] = "Yes" if auth.get("authorized_us", True) else "No"
     derived["sponsorship"] = "Yes" if auth.get("requires_sponsorship") else "No"
-    std = out.get("standard_answers") if isinstance(out.get("standard_answers"), dict) else {}
+    std = (
+        out.get("standard_answers")
+        if isinstance(out.get("standard_answers"), dict)
+        else {}
+    )
     if std.get("how_did_you_hear"):
         derived["how_heard"] = str(std["how_did_you_hear"])
     out["_derived"] = derived
@@ -276,7 +349,9 @@ def attach_resume(vault: dict[str, Any], resume_data: dict[str, Any] | None) -> 
     personal["linkedin_url"] = linkedin
     personal["github"] = github
     personal["github_url"] = github
-    personal["address_line1"] = personal.get("address_line1") or personal.get("line1") or ""
+    personal["address_line1"] = (
+        personal.get("address_line1") or personal.get("line1") or ""
+    )
     out["personal"] = personal
     return out
 
@@ -286,7 +361,11 @@ def persist_filled_answers(filled: dict[str, str]) -> None:
     if not filled:
         return
     try:
-        vault = json.loads(_VAULT_PATH.read_text(encoding="utf-8")) if _VAULT_PATH.exists() else {}
+        vault = (
+            json.loads(_VAULT_PATH.read_text(encoding="utf-8"))
+            if _VAULT_PATH.exists()
+            else {}
+        )
     except Exception:
         vault = {}
     answers = dict(vault.get("answers") or {})
@@ -296,7 +375,11 @@ def persist_filled_answers(filled: dict[str, str]) -> None:
         val = str(raw_val or "").strip()
         if not key or not val or key in _SKIP_REMEMBER:
             continue
-        if val.lower().endswith(".pdf") or "\\temp\\" in val.lower() or "/tmp" in val.lower():
+        if (
+            val.lower().endswith(".pdf")
+            or "\\temp\\" in val.lower()
+            or "/tmp" in val.lower()
+        ):
             continue
         if answers.get(key) == val:
             continue
@@ -319,7 +402,11 @@ def merge_vault(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, 
         if key in {"gmail_app_password", "password", "session_cookie", "app_password"}:
             if value in (None, "", "********"):
                 continue
-        if key == "answers" and isinstance(value, dict) and isinstance(out.get("answers"), dict):
+        if (
+            key == "answers"
+            and isinstance(value, dict)
+            and isinstance(out.get("answers"), dict)
+        ):
             merged = dict(out["answers"])
             merged.update(value)
             out["answers"] = merged
@@ -344,7 +431,8 @@ def redact_vault(vault: dict[str, Any]) -> dict[str, Any]:
             out["credentials"]["password"] = "********"
     jobright = out.get("jobright") if isinstance(out.get("jobright"), dict) else {}
     out["jobright_configured"] = bool(
-        jobright.get("session_cookie") or (jobright.get("email") and jobright.get("password"))
+        jobright.get("session_cookie")
+        or (jobright.get("email") and jobright.get("password"))
     )
     if isinstance(out.get("jobright"), dict):
         if out["jobright"].get("password"):
@@ -358,9 +446,13 @@ def redact_vault(vault: dict[str, Any]) -> dict[str, Any]:
 
 def gmail_credentials(vault: dict[str, Any]) -> tuple[str, str]:
     personal = vault.get("personal") if isinstance(vault.get("personal"), dict) else {}
-    creds = vault.get("credentials") if isinstance(vault.get("credentials"), dict) else {}
+    creds = (
+        vault.get("credentials") if isinstance(vault.get("credentials"), dict) else {}
+    )
     email = str(creds.get("gmail") or personal.get("email") or "").strip()
-    password = str(creds.get("gmail_app_password") or vault.get("gmail_app_password") or "").strip()
+    password = str(
+        creds.get("gmail_app_password") or vault.get("gmail_app_password") or ""
+    ).strip()
     if password == "********":
         password = ""
     return email, password

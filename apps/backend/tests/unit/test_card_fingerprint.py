@@ -4,13 +4,16 @@ from app.services.pipeline_service import _role_stem, card_fingerprint
 
 
 def test_strips_company_from_role_title():
-    assert card_fingerprint("Omnicom", "Senior AI Engineer @ Omnicom") == card_fingerprint(
-        "Omnicom", "Senior AI Engineer"
-    )
+    assert card_fingerprint(
+        "Omnicom", "Senior AI Engineer @ Omnicom"
+    ) == card_fingerprint("Omnicom", "Senior AI Engineer")
 
 
 def test_at_separator_and_whitespace():
-    assert card_fingerprint("Stripe", "Staff Engineer  at   Stripe") == "stripe::staff engineer"
+    assert (
+        card_fingerprint("Stripe", "Staff Engineer  at   Stripe")
+        == "stripe::staff engineer"
+    )
 
 
 def test_unknown_cards_are_not_collapsed():

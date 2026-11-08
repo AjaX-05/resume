@@ -145,7 +145,9 @@ def _strip_html(text: str) -> str:
     cleaned = re.sub(r"</(p|div|li|h[1-6]|tr|ul|ol)>", "\n", cleaned, flags=re.I)
     cleaned = re.sub(r"<[^>]+>", " ", cleaned)
     cleaned = html.unescape(cleaned)
-    return re.sub(r"[ \t]+\n", "\n", re.sub(r"\n{3,}", "\n\n", re.sub(r"[^\S\n]+", " ", cleaned))).strip()
+    return re.sub(
+        r"[ \t]+\n", "\n", re.sub(r"\n{3,}", "\n\n", re.sub(r"[^\S\n]+", " ", cleaned))
+    ).strip()
 
 
 def _sanitize_user_input(text: str) -> str:

@@ -95,6 +95,7 @@ def _line_fill_advice(text: str) -> str:
         f"expand to ~{expand_target}ch OR shrink to ~{shrink_target}ch)"
     )
 
+
 # Fact tokens: tool-like tokens (C++, Node.js, CI/CD, S3), acronyms and
 # capitalized words that do not start a sentence (names, products).
 _WORD_RE = re.compile(r"[^\W_][\w+#./&-]*", re.UNICODE)

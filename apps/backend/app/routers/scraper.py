@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,7 +43,9 @@ _stop_requested = False
 # Timestamp of the scrape start — used to find NEW application cards afterwards
 # (anything created on/after this timestamp is a product of this scrape run).
 _scrape_started_at: dict[str, str] = {"value": ""}
-_SCRAPE_TIMEOUT_SECONDS = 2400  # 40 min; cards are posted live so a timeout still leaves jobs
+_SCRAPE_TIMEOUT_SECONDS = (
+    2400  # 40 min; cards are posted live so a timeout still leaves jobs
+)
 
 
 def _bump_jobs_from_line(line: str, jobs_found: int) -> int:
@@ -232,21 +233,24 @@ def _run_auto_tailor_sync() -> str | None:
         new_saved_ids = [
             a["application_id"]
             for a in all_apps
-            if a.get("status") == "saved" and (not started or a.get("created_at", "") >= started)
+            if a.get("status") == "saved"
+            and (not started or a.get("created_at", "") >= started)
         ]
         if not new_saved_ids:
             return None
         # Filter down to supported ATS only
         ats_map = await detect_ats_for_applications(new_saved_ids)
-        supported_ids = [
-            aid for aid, info in ats_map.items() if info.get("supported")
-        ]
+        supported_ids = [aid for aid, info in ats_map.items() if info.get("supported")]
         if not supported_ids:
-            logger.info("Auto-tailor: 0 supported cards among %d new saved cards", len(new_saved_ids))
+            logger.info(
+                "Auto-tailor: 0 supported cards among %d new saved cards",
+                len(new_saved_ids),
+            )
             return None
         logger.info(
             "Auto-tailor: queuing %d supported cards (of %d new)",
-            len(supported_ids), len(new_saved_ids),
+            len(supported_ids),
+            len(new_saved_ids),
         )
         task = await bulk_tailor(
             supported_ids,
@@ -359,7 +363,11 @@ async def sync_existing_discoveries() -> dict:
     and creates one application card per job. Skips jobs already in the tracker.
     """
     if not _DISCOVERED_DIR.exists():
-        return {"synced": 0, "skipped": 0, "message": "No discovered jobs directory yet"}
+        return {
+            "synced": 0,
+            "skipped": 0,
+            "message": "No discovered jobs directory yet",
+        }
 
     # Find the default master resume
     resumes = await db.list_resumes()
@@ -415,7 +423,9 @@ async def sync_existing_discoveries() -> dict:
                 if key:
                     seen.add(key)
             except Exception as e:
-                logger.warning(f"Failed to sync {job.get('title')} @ {job.get('company')}: {e}")
+                logger.warning(
+                    f"Failed to sync {job.get('title')} @ {job.get('company')}: {e}"
+                )
                 errors += 1
 
     return {"synced": synced, "skipped": skipped, "errors": errors}

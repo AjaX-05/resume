@@ -202,11 +202,14 @@ class TestRemoveAiPhrases:
         senior-leadership signal verbs. We verify a different blacklisted
         verb (`revolutionized`) is still scrubbed."""
         data = copy.deepcopy(sample_resume)
-        data["workExperience"][0]["description"][0] = "Revolutionized REST API development"
+        data["workExperience"][0]["description"][0] = (
+            "Revolutionized REST API development"
+        )
         cleaned, removed = remove_ai_phrases(data)
         assert "revolutionized" in [r.lower() for r in removed]
         assert (
-            "revolutionized" not in cleaned["workExperience"][0]["description"][0].lower()
+            "revolutionized"
+            not in cleaned["workExperience"][0]["description"][0].lower()
         )
 
     def test_removes_buzzwords(self, sample_resume):

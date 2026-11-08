@@ -206,7 +206,9 @@ async def claude_acompletion(
     # OAuth still works because it reads from the keychain, not cwd.
     empty_dir = tempfile.mkdtemp(prefix="rm-cli-")
     try:
-        out, err, returncode = await _run(args, prompt, kwargs.get("timeout"), cwd=empty_dir)
+        out, err, returncode = await _run(
+            args, prompt, kwargs.get("timeout"), cwd=empty_dir
+        )
     finally:
         try:
             os.rmdir(empty_dir)

@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.database import db
-from app.services.apply_answers import merge_vault, redact_vault
 from app.services.applier_service import (
     ApplyStatus,
     approve_application,
@@ -19,6 +18,7 @@ from app.services.applier_service import (
     save_vault,
     start_application,
 )
+from app.services.apply_answers import merge_vault, redact_vault
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/applier", tags=["Auto-Applier"])
@@ -61,13 +61,13 @@ async def start_apply(req: StartApplyRequest) -> ApplyStatusResponse:
         raise HTTPException(
             status_code=400,
             detail="No apply URL found in this application card. "
-                   "Check that the scraper stored an Apply: line in the notes.",
+            "Check that the scraper stored an Apply: line in the notes.",
         )
 
     # Generate resume PDF using the same render pipeline as the download endpoint
-    from app.pdf import render_resume_pdf, PDFRenderError
-    from app.services.page_fit import resume_print_url
+    from app.pdf import PDFRenderError, render_resume_pdf
     from app.schemas.models import PageFitSettings
+    from app.services.page_fit import resume_print_url
 
     fit = PageFitSettings()  # default margins / template settings
     print_url = resume_print_url(req.resume_id, fit)
@@ -78,7 +78,7 @@ async def start_apply(req: StartApplyRequest) -> ApplyStatusResponse:
         raise HTTPException(
             status_code=503,
             detail=f"Could not render resume PDF: {e}. "
-                   "Make sure the frontend is running on port 3000.",
+            "Make sure the frontend is running on port 3000.",
         )
     except Exception as e:
         raise HTTPException(
@@ -127,9 +127,7 @@ async def apply_status(application_id: str) -> ApplyStatusResponse:
         try:
             current = await db.get_application(application_id)
             if current and current.get("status") != "no_response":
-                await db.update_application(
-                    application_id, {"status": "no_response"}
-                )
+                await db.update_application(application_id, {"status": "no_response"})
         except Exception as e:
             logger.warning(f"Failed to move card to Applied: {e}")
 

@@ -1596,10 +1596,10 @@ def _supports_temperature(
 
     # Provider-specific restrictions not captured by the registry.
     # Anthropic Opus 4.x deprecated temperature entirely.
-    
-# Provider-specific restrictions not captured by the registry.
-# Omit temperature for Anthropic Claude Sonnet 4.5 and Opus 4.x.
-# These models may reject explicit temperature parameters.
+
+    # Provider-specific restrictions not captured by the registry.
+    # Omit temperature for Anthropic Claude Sonnet 4.5 and Opus 4.x.
+    # These models may reject explicit temperature parameters.
     model_lower = model_name.lower()
 
     if (
@@ -1608,7 +1608,6 @@ def _supports_temperature(
         or "claude-opus-4" in model_lower
     ):
         return False
-
 
     # Moonshot kimi-k2.6 only allows temperature=1.
     if "kimi-k2.6" in model_name.lower() and temperature != 1.0:
@@ -1986,11 +1985,10 @@ async def complete_json(
                 if not isinstance(result, dict):
                     raise ValueError("Response validator must return a JSON object")
 
-
-
             # Normalize punctuation in generated resume content.
             # Preserve ordinary hyphens used in technical terminology.
             if schema_type in ("resume", "enrichment", "diff"):
+
                 def normalize_punctuation(value):
                     if isinstance(value, str):
                         return value.replace("\u2014", ", ").replace("\u2013", "-")
@@ -2004,8 +2002,6 @@ async def complete_json(
                     return value
 
                 result = normalize_punctuation(result)
-
-
 
             # LLM-001: Check if parsed result appears truncated
             if _appears_truncated(result, schema_type):

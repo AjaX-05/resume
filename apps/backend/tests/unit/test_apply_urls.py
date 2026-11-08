@@ -47,7 +47,9 @@ def test_detect_ats_workday_is_supported() -> None:
 
 
 def test_detect_ats_privateai_email() -> None:
-    ats, supported = detect_ats("https://privateai.com/jobs/artificial-intelligence-engineer")
+    ats, supported = detect_ats(
+        "https://privateai.com/jobs/artificial-intelligence-engineer"
+    )
     assert ats == "email"
     assert supported is True
 
@@ -72,7 +74,9 @@ def test_upsert_employer_apply_notes_insert_and_replace() -> None:
     notes = "Apply: https://jobright.ai/jobs/info/abc\n"
     once = upsert_employer_apply_notes(notes, "https://example.myworkdayjobs.com/job/1")
     assert once.count("EmployerApply:") == 1
-    twice = upsert_employer_apply_notes(once, "https://job-boards.greenhouse.io/lyft/jobs/9")
+    twice = upsert_employer_apply_notes(
+        once, "https://job-boards.greenhouse.io/lyft/jobs/9"
+    )
     assert twice.count("EmployerApply:") == 1
     assert "token=9" in twice
     assert "jobright.ai" in twice
@@ -81,7 +85,10 @@ def test_upsert_employer_apply_notes_insert_and_replace() -> None:
 def test_original_job_post_prefers_labeled_employer_link() -> None:
     labeled = [
         ("APPLY WITH AUTOFILL", "https://jobright.ai/jobs/info/abc"),
-        ("Original Job Post", "https://boseallaboutme.wd503.myworkdayjobs.com/en-US/Bose_Careers/job/R29335"),
+        (
+            "Original Job Post",
+            "https://boseallaboutme.wd503.myworkdayjobs.com/en-US/Bose_Careers/job/R29335",
+        ),
         ("Crunchbase", "https://www.crunchbase.com/organization/bose"),
     ]
     url = pick_original_job_post_url(labeled)
@@ -92,7 +99,9 @@ def test_original_job_post_prefers_labeled_employer_link() -> None:
 
 
 def test_titles_match_allows_subtitle() -> None:
-    assert titles_match("Machine Learning Engineer", "Machine Learning Engineer, Fulfillment")
+    assert titles_match(
+        "Machine Learning Engineer", "Machine Learning Engineer, Fulfillment"
+    )
     assert not titles_match("Machine Learning Engineer", "Account Executive Intern")
 
 
@@ -117,10 +126,15 @@ def test_lookup_greenhouse_uses_public_board(monkeypatch) -> None:
 
     monkeypatch.setattr(apply_urls, "fetch_json", fake_json)
     url = apply_urls.lookup_public_apply_url("Lyft", "Machine Learning Engineer")
-    assert url == "https://job-boards.greenhouse.io/embed/job_app?for=lyft&token=8689127002"
+    assert (
+        url
+        == "https://job-boards.greenhouse.io/embed/job_app?for=lyft&token=8689127002"
+    )
 
 
 def test_apply_session_approval_is_thread_safe() -> None:
-    session = ApplicationSession("app-1", "https://job-boards.greenhouse.io/embed/job_app?for=lyft&token=1")
+    session = ApplicationSession(
+        "app-1", "https://job-boards.greenhouse.io/embed/job_app?for=lyft&token=1"
+    )
     assert isinstance(session._approval_thread_event, threading.Event)
     assert session._approval_thread_event.is_set() is False

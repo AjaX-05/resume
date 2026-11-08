@@ -45,24 +45,24 @@ _CONFIG_PATH = Path(__file__).parents[2] / "data" / "pipeline.json"
 # ────────────────────────────────────────────────────────────────────────────
 
 SUPPORTED_ATS: dict[str, list[str]] = {
-    "greenhouse":      ["greenhouse.io", "grnh.se", "careerpuck.com"],
-    "ashby":           ["ashbyhq.com"],
-    "lever":           ["lever.co"],
-    "workable":        ["workable.com"],
-    "gem":             ["jobs.gem.com"],
-    "dover":           ["dover.com"],
-    "rippling":        ["ats.rippling.com", "recruiting.rippling.com"],
+    "greenhouse": ["greenhouse.io", "grnh.se", "careerpuck.com"],
+    "ashby": ["ashbyhq.com"],
+    "lever": ["lever.co"],
+    "workable": ["workable.com"],
+    "gem": ["jobs.gem.com"],
+    "dover": ["dover.com"],
+    "rippling": ["ats.rippling.com", "recruiting.rippling.com"],
     "smartrecruiters": ["smartrecruiters.com"],
-    "bamboohr":        ["bamboohr.com"],
-    "workday":         ["myworkdayjobs.com"],
-    "email":           ["mailto:", "privateai.com/jobs"],
+    "bamboohr": ["bamboohr.com"],
+    "workday": ["myworkdayjobs.com"],
+    "email": ["mailto:", "privateai.com/jobs"],
 }
 
 UNSUPPORTED_ATS: dict[str, list[str]] = {
-    "icims":     ["icims.com"],
-    "jobvite":   ["jobvite.com"],
-    "linkedin":  ["linkedin.com"],
-    "indeed":    ["indeed.com"],
+    "icims": ["icims.com"],
+    "jobvite": ["jobvite.com"],
+    "linkedin": ["linkedin.com"],
+    "indeed": ["indeed.com"],
 }
 
 # Aggregator URLs — the real ATS is behind an Apply button and gets resolved
@@ -70,7 +70,7 @@ UNSUPPORTED_ATS: dict[str, list[str]] = {
 # SUPPORTED optimistically (worst case, resolver falls back and we see a
 # screenshot of the aggregator page for manual action).
 AGGREGATOR_ATS: dict[str, list[str]] = {
-    "jobright":  ["jobright.ai"],
+    "jobright": ["jobright.ai"],
     "wellfound": ["wellfound.com/jobs"],
 }
 
@@ -156,9 +156,10 @@ async def attach_tailored_resume(
         return bool(job_id) and app.get("job_id") == job_id
 
     def same_fp(app: dict[str, Any]) -> bool:
-        return bool(fingerprint) and card_fingerprint(
-            app.get("company"), app.get("role")
-        ) == fingerprint
+        return (
+            bool(fingerprint)
+            and card_fingerprint(app.get("company"), app.get("role")) == fingerprint
+        )
 
     target: dict[str, Any] | None = None
     if application_id:
@@ -204,10 +205,18 @@ async def attach_tailored_resume(
             continue
         extra_url = extract_apply_url(extra.get("notes") or "")
         extra_company = (extra.get("company") or "").strip().lower()
-        drop_clone = extra.get("status") == "applied" and _is_clone_card(extra) and (
-            same_job(extra)
-            or same_fp(extra)
-            or (bool(application_id) and bool(company_key) and extra_company == company_key)
+        drop_clone = (
+            extra.get("status") == "applied"
+            and _is_clone_card(extra)
+            and (
+                same_job(extra)
+                or same_fp(extra)
+                or (
+                    bool(application_id)
+                    and bool(company_key)
+                    and extra_company == company_key
+                )
+            )
         )
         drop_dup_jd = (
             extra.get("status") == "saved"
@@ -277,7 +286,8 @@ async def collapse_tailored_clones() -> int:
             continue
         result = await attach_tailored_resume(
             tailored_resume_id=donor["resume_id"],
-            master_resume_id=donor.get("master_resume_id") or target.get("master_resume_id"),
+            master_resume_id=donor.get("master_resume_id")
+            or target.get("master_resume_id"),
             job_id=target.get("job_id") or donor.get("job_id"),
             application_id=target["application_id"],
             company=target.get("company") or donor.get("company"),
@@ -309,7 +319,8 @@ async def collapse_tailored_clones() -> int:
             continue
         result = await attach_tailored_resume(
             tailored_resume_id=donor["resume_id"],
-            master_resume_id=donor.get("master_resume_id") or target.get("master_resume_id"),
+            master_resume_id=donor.get("master_resume_id")
+            or target.get("master_resume_id"),
             job_id=target.get("job_id") or donor.get("job_id"),
             application_id=target["application_id"],
             company=target.get("company") or donor.get("company"),
@@ -342,13 +353,16 @@ async def collapse_tailored_clones() -> int:
             try:
                 await db.delete_application(clone["application_id"])
             except Exception:
-                logger.warning("Could not delete leftover clone %s", clone["application_id"])
+                logger.warning(
+                    "Could not delete leftover clone %s", clone["application_id"]
+                )
     return moved
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # Config
 # ────────────────────────────────────────────────────────────────────────────
+
 
 def load_config() -> dict[str, Any]:
     if _CONFIG_PATH.exists():
@@ -376,8 +390,15 @@ def save_config(config: dict[str, Any]) -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 ItemStatus = Literal[
-    "pending", "queued", "tailoring", "tailored",
-    "applying", "needs_review", "applied", "failed", "skipped",
+    "pending",
+    "queued",
+    "tailoring",
+    "tailored",
+    "applying",
+    "needs_review",
+    "applied",
+    "failed",
+    "skipped",
 ]
 
 
@@ -398,7 +419,9 @@ class PipelineTask:
     task_id: str
     kind: Literal["tailor", "apply"]
     items: list[PipelineItem] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     completed_at: str | None = None
     follow_up_task_id: str | None = None
 
@@ -435,6 +458,7 @@ def list_tasks() -> list[dict[str, Any]]:
 # ────────────────────────────────────────────────────────────────────────────
 # BULK TAILOR
 # ────────────────────────────────────────────────────────────────────────────
+
 
 async def bulk_tailor(
     application_ids: list[str],
@@ -498,7 +522,9 @@ async def bulk_tailor(
 
         if not supported:
             item.status = "skipped"
-            item.error = f"ATS not supported ({ats})" if ats != "none" else "No apply URL"
+            item.error = (
+                f"ATS not supported ({ats})" if ats != "none" else "No apply URL"
+            )
             task.items.append(item)
             continue
 
@@ -540,6 +566,7 @@ async def bulk_tailor(
     # Kick the queue worker
     try:
         from app.services.queue_worker import queue_manager
+
         queue_manager.notify()
     except Exception:
         pass
@@ -587,7 +614,9 @@ async def on_queue_item_completed(
         app_id = app_id or mapped_app_id
         task = _tasks.get(task_id)
         if task:
-            item = next((row for row in task.items if row.queue_item_id == item_id), None)
+            item = next(
+                (row for row in task.items if row.queue_item_id == item_id), None
+            )
 
     if error or not tailored_resume_id:
         if item:
@@ -637,7 +666,9 @@ async def _finish_tailor_if_done(task: PipelineTask) -> None:
         return
     config = load_config()
     if config.get("auto_apply", False):
-        apply_ids = [row.application_id for row in task.items if row.status == "tailored"]
+        apply_ids = [
+            row.application_id for row in task.items if row.status == "tailored"
+        ]
         if apply_ids:
             try:
                 apply_task = await bulk_apply(apply_ids)
@@ -658,6 +689,7 @@ def _check_task_complete(task: PipelineTask) -> None:
 # BULK APPLY
 # ────────────────────────────────────────────────────────────────────────────
 
+
 async def eligible_tailored_ids() -> list[str]:
     """Tailored cards (status=applied) that have a resume and a supported ATS."""
     ids: list[str] = []
@@ -666,7 +698,9 @@ async def eligible_tailored_ids() -> list[str]:
             continue
         if not app.get("resume_id"):
             continue
-        apply_url = extract_apply_url(app.get("notes") or "", app.get("job_content") or "")
+        apply_url = extract_apply_url(
+            app.get("notes") or "", app.get("job_content") or ""
+        )
         _ats, supported = detect_ats(apply_url)
         if supported:
             ids.append(app["application_id"])
@@ -690,7 +724,9 @@ async def bulk_apply(application_ids: list[str]) -> PipelineTask:
             continue
 
         listed_url = extract_apply_url(app.get("notes", ""), app.get("job_content", ""))
-        apply_url = effective_apply_url(app.get("notes", "") or "", app.get("job_content", "") or "")
+        apply_url = effective_apply_url(
+            app.get("notes", "") or "", app.get("job_content", "") or ""
+        )
         ats, supported = detect_ats(apply_url or listed_url)
 
         item = PipelineItem(
@@ -731,6 +767,8 @@ async def _run_apply_batch(task: PipelineTask) -> None:
     from app.schemas.models import PageFitSettings
     from app.services.applier_service import (
         get_session as get_apply_session,
+    )
+    from app.services.applier_service import (
         prepare_vault,
         start_application,
     )
@@ -784,7 +822,9 @@ async def _run_apply_batch(task: PipelineTask) -> None:
     _check_task_complete(task)
 
 
-async def _wait_for_apply_session(application_id: str, timeout_seconds: float = 900) -> None:
+async def _wait_for_apply_session(
+    application_id: str, timeout_seconds: float = 900
+) -> None:
     """Block until this apply session is terminal (or the review timeout fires)."""
     from app.services.applier_service import get_session as get_apply_session
 
@@ -834,7 +874,10 @@ async def refresh_apply_task_statuses(task_id: str) -> PipelineTask | None:
 # ATS Detection for frontend badges
 # ────────────────────────────────────────────────────────────────────────────
 
-async def detect_ats_for_applications(application_ids: list[str]) -> dict[str, dict[str, Any]]:
+
+async def detect_ats_for_applications(
+    application_ids: list[str],
+) -> dict[str, dict[str, Any]]:
     """Return {app_id: {ats, supported, apply_url}} for a batch of applications."""
     out: dict[str, dict[str, Any]] = {}
     for app_id in application_ids:

@@ -39,8 +39,8 @@ from app.database import DatabaseBusyError, db
 from app.host_guard import HostGuardMiddleware
 from app.pdf import close_pdf_renderer
 from app.routers import (
-    applier_router,
     applications_router,
+    applier_router,
     ats_router,
     chatgpt_callback_router,
     chatgpt_router,

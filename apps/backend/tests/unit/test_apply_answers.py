@@ -8,7 +8,6 @@ from app.services.apply_answers import (
     work_history,
 )
 
-
 RESUME = {
     "personalInfo": {
         "name": "Ada Lovelace",
@@ -36,7 +35,9 @@ RESUME = {
             "years": "Aug 2023 - May 2025",
         }
     ],
-    "personalProjects": [{"name": "Archon", "description": ["Knowledge-graph extractor."]}],
+    "personalProjects": [
+        {"name": "Archon", "description": ["Knowledge-graph extractor."]}
+    ],
 }
 
 
@@ -67,7 +68,11 @@ def test_work_history_parses_present() -> None:
 def test_answer_for_prefers_learned_then_alias() -> None:
     vault = attach_resume(
         {
-            "personal": {"first_name": "Ada", "last_name": "Lovelace", "linkedin": "https://li/ada"},
+            "personal": {
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "linkedin": "https://li/ada",
+            },
             "work_auth": {"authorized_us": True, "requires_sponsorship": True},
             "answers": {"how did you hear about this job": "Jobright"},
             "eeo": {},
@@ -77,8 +82,13 @@ def test_answer_for_prefers_learned_then_alias() -> None:
     assert answer_for(vault, "How did you hear about this job?") == "Jobright"
     assert answer_for(vault, "LinkedIn Profile *") == "https://li/ada"
     assert answer_for(vault, "Signature") == "Ada Lovelace"
-    assert answer_for(vault, "Tell us about a project you led") == vault["_derived"]["project"]
-    assert answer_for(vault, "Will you now or in the future require sponsorship?") == "Yes"
+    assert (
+        answer_for(vault, "Tell us about a project you led")
+        == vault["_derived"]["project"]
+    )
+    assert (
+        answer_for(vault, "Will you now or in the future require sponsorship?") == "Yes"
+    )
     assert "decline" in answer_for(vault, "Gender *").lower()
     assert answer_for(vault, "I have read the Lyft Extended Family Policy") == "Yes"
 

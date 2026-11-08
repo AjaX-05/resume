@@ -4,6 +4,7 @@ Jobright/Wellfound hide the real Greenhouse/Lever/Ashby/Workday URL behind a
 login wall. We keep the aggregator link on the card for provenance and store
 the employer URL separately so Auto-Apply can open a real form.
 """
+
 from __future__ import annotations
 
 import json
@@ -207,7 +208,10 @@ def pick_original_job_post_url(labeled_links: list[tuple[str, str]]) -> str:
     """Prefer the Jobright 'Original Job Post' control over Autofill / Apply Now."""
     for text, href in labeled_links:
         blob = f"{text or ''} {href or ''}".lower()
-        if "original job post" not in blob and "original job" not in (text or "").lower():
+        if (
+            "original job post" not in blob
+            and "original job" not in (text or "").lower()
+        ):
             continue
         href = (href or "").strip()
         if href and (is_ats_url(href) or is_original_employer_url(href)):
@@ -237,7 +241,9 @@ def extract_listed_apply_url(notes: str, job_content: str = "") -> str:
 
 def effective_apply_url(notes: str, job_content: str = "") -> str:
     """Employer ATS URL when we have one, otherwise the listed Apply: URL."""
-    return extract_employer_apply_url(notes) or extract_listed_apply_url(notes, job_content)
+    return extract_employer_apply_url(notes) or extract_listed_apply_url(
+        notes, job_content
+    )
 
 
 def upsert_employer_apply_notes(notes: str, url: str) -> str:
@@ -255,11 +261,18 @@ def lookup_public_apply_url(company: str, role: str) -> str:
     """Find a public employer apply URL from Greenhouse/Lever/Ashby/DuckDuckGo."""
     if not company or not role:
         return ""
-    for finder in (_search_greenhouse, _search_lever, _search_ashby, _search_duckduckgo):
+    for finder in (
+        _search_greenhouse,
+        _search_lever,
+        _search_ashby,
+        _search_duckduckgo,
+    ):
         try:
             found = finder(company, role)
         except Exception as exc:
-            logger.debug("%s lookup failed for %s / %s: %s", finder.__name__, company, role, exc)
+            logger.debug(
+                "%s lookup failed for %s / %s: %s", finder.__name__, company, role, exc
+            )
             found = ""
         if found:
             return canonical_apply_url(found)

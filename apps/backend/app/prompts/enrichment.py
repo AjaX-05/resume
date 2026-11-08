@@ -1,4 +1,3 @@
-
 """Prompt templates for AI-powered resume enrichment."""
 
 ANALYZE_RESUME_PROMPT = """You are an expert technical resume analyst. Identify weak or incomplete experience and project descriptions, with particular attention to senior engineering ownership, architecture, technical implementation, and demonstrable outcomes.
@@ -62,7 +61,6 @@ STRICT RULES:
 - Never use em dashes, en dashes, or double hyphens as punctuation in generated text.
 - Return ONLY valid JSON.
 """
-
 
 
 ENHANCE_DESCRIPTION_PROMPT = """You are an expert senior technical resume writer. ADD genuinely new achievement bullets based ONLY on the candidate's additional answers. Do not replace, delete, or paraphrase existing bullets.

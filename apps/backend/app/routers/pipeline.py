@@ -50,6 +50,7 @@ class AtsDetectRequest(BaseModel):
 # ATS detection — frontend uses this to show badges on JD cards
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @router.post("/ats-detect")
 async def ats_detect(req: AtsDetectRequest) -> dict[str, dict[str, Any]]:
     """Classify the ATS behind each application's apply URL.
@@ -70,6 +71,7 @@ async def ats_detect(req: AtsDetectRequest) -> dict[str, dict[str, Any]]:
 # ────────────────────────────────────────────────────────────────────────────
 # BULK TAILOR
 # ────────────────────────────────────────────────────────────────────────────
+
 
 @router.post("/bulk-tailor")
 async def bulk_tailor_endpoint(req: BulkTailorRequest) -> dict[str, Any]:
@@ -95,6 +97,7 @@ async def bulk_tailor_endpoint(req: BulkTailorRequest) -> dict[str, Any]:
 # BULK APPLY
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @router.post("/bulk-apply")
 async def bulk_apply_endpoint(req: BulkApplyRequest) -> dict[str, Any]:
     """Start Playwright apply sessions for N tailored applications.
@@ -113,6 +116,7 @@ async def bulk_apply_endpoint(req: BulkApplyRequest) -> dict[str, Any]:
 # ────────────────────────────────────────────────────────────────────────────
 # STATUS
 # ────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/status/{task_id}")
 async def task_status(task_id: str) -> dict[str, Any]:
@@ -135,6 +139,7 @@ async def tasks_list() -> list[dict[str, Any]]:
 # ────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/config", response_model=PipelineConfig)
 async def get_pipeline_config() -> PipelineConfig:
